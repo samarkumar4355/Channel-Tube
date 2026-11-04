@@ -29,6 +29,10 @@ class ChannelRepository(
         return api.searchChannels(query)
     }
 
+    suspend fun searchVideos(query: String, maxResults: Int = 25): List<VideoEntity> {
+        return api.searchVideos(query = query, maxResults = maxResults).videos
+    }
+
     suspend fun addChannel(result: ChannelSearchResult) {
         val channel = api.getSavedChannel(result)
         dao.insertChannel(channel)

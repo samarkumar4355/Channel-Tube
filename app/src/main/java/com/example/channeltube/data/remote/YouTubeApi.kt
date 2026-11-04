@@ -164,6 +164,53 @@ class YouTubeApi(private val apiKey: String) {
         return PaginatedVideos(videos, nextPageToken)
     }
 
+    suspend fun searchVideos(
+        query: String,
+        pageToken: String? = null,
+        maxResults: Int = 25
+    ): PaginatedVideos {
+        ensureApiKey()
+        val params = mutableMapOf(
+            "part" to "snippet",
+            "type" to "video",
+            "q" to query.trim(),
+            "maxResults" to maxResults.toString()
+        )
+        if (!pageToken.isNullOrBlank()) {
+            params["pageToken"] = pageToken
+        }
+
+        val json = getJson("search", params)
+        val nextPageToken = json.optString("nextPageToken").takeIf { it.isNotBlank() }
+        val items = json.optJSONArray("items") ?: return PaginatedVideos(emptyList(), null)
+        val videos = mutableListOf<VideoEntity>()
+
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val idObj = item.optJSONObject("id") ?: continue
+            val videoId = idObj.optString("videoId").orEmpty()
+            if (videoId.isBlank()) continue
+
+            val snippet = item.optJSONObject("snippet") ?: continue
+            val channelId = snippet.optString("channelId").orEmpty()
+            val channelTitle = snippet.optString("channelTitle").takeIf { it.isNotBlank() }
+                ?: "YouTube"
+
+            videos.add(
+                VideoEntity(
+                    videoId = videoId,
+                    channelId = channelId,
+                    channelName = channelTitle,
+                    title = decodeHtml(snippet.optString("title", "Untitled video")),
+                    description = snippet.optString("description", ""),
+                    thumbnailUrl = thumbnailUrl(snippet),
+                    publishedAt = snippet.optString("publishedAt", "")
+                )
+            )
+        }
+        return PaginatedVideos(videos, nextPageToken)
+    }
+
     suspend fun searchChannelVideos(
         channelId: String,
         query: String,

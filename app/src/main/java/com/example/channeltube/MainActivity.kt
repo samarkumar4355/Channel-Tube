@@ -28,21 +28,22 @@ class MainActivity : ComponentActivity() {
             }
         } catch (_: Exception) {}
 
-        // 2. High performance Coil image loader with aggressive memory + disk caching
+        // 2. High performance Coil image loader with aggressive memory + disk caching and hardware GPU bitmaps
         try {
             val imageLoader = ImageLoader.Builder(this)
                 .memoryCache {
                     MemoryCache.Builder(this)
-                        .maxSizePercent(0.25)
+                        .maxSizePercent(0.30)
                         .build()
                 }
                 .diskCache {
                     DiskCache.Builder()
                         .directory(File(cacheDir, "image_cache"))
-                        .maxSizeBytes(100L * 1024 * 1024)
+                        .maxSizeBytes(150L * 1024 * 1024)
                         .build()
                 }
-                .crossfade(150)
+                .allowHardware(true)
+                .crossfade(false)
                 .respectCacheHeaders(false)
                 .build()
             Coil.setImageLoader(imageLoader)

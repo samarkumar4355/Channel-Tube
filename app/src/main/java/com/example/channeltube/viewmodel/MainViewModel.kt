@@ -68,6 +68,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _workingChannelId = MutableStateFlow<String?>(null)
     val workingChannelId: StateFlow<String?> = _workingChannelId
 
+    private val _videoSearchQuery = MutableStateFlow("")
+    val videoSearchQuery: StateFlow<String> = _videoSearchQuery
+
+    private val _isSearchingVideos = MutableStateFlow(false)
+    val isSearchingVideos: StateFlow<Boolean> = _isSearchingVideos
+
+    private val _videoSearchResults = MutableStateFlow<List<VideoEntity>>(emptyList())
+    val videoSearchResults: StateFlow<List<VideoEntity>> = _videoSearchResults
+
+    private val _isVideoSearchSubmitted = MutableStateFlow(false)
+    val isVideoSearchSubmitted: StateFlow<Boolean> = _isVideoSearchSubmitted
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
@@ -114,6 +126,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _isSearching.value = false
             }
         }
+    }
+
+    fun onVideoSearchQueryChange(query: String) {
+        _videoSearchQuery.value = query
+        if (query.isBlank()) {
+            _videoSearchResults.value = emptyList()
+            _isVideoSearchSubmitted.value = false
+        }
+    }
+
+    fun searchAnyVideo(query: String? = null) {
+        val q = (query ?: _videoSearchQuery.value).trim()
+        if (q.isBlank()) {
+            _message.value = "Please enter a search term."
+            return
+        }
+
+        _videoSearchQuery.value = q
+        viewModelScope.launch {
+            _isSearchingVideos.value = true
+            _isVideoSearchSubmitted.value = true
+            _message.value = null
+            try {
+                val results = repository.searchVideos(q, maxResults = 25)
+                _videoSearchResults.value = results
+                if (results.isEmpty()) {
+                    _message.value = "No videos found for \"$q\"."
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                _message.value = error.message ?: "Could not search videos."
+            } finally {
+                _isSearchingVideos.value = false
+            }
+        }
+    }
+
+    fun clearVideoSearch() {
+        _videoSearchQuery.value = ""
+        _videoSearchResults.value = emptyList()
+        _isVideoSearchSubmitted.value = false
     }
 
     fun addChannel(result: ChannelSearchResult) {

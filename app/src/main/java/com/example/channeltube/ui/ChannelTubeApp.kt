@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -50,6 +51,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -60,6 +63,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -78,6 +82,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -86,6 +92,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -127,6 +134,11 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
     val message by viewModel.message.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
+
+    val videoSearchQuery by viewModel.videoSearchQuery.collectAsState()
+    val isSearchingVideos by viewModel.isSearchingVideos.collectAsState()
+    val videoSearchResults by viewModel.videoSearchResults.collectAsState()
+    val isVideoSearchSubmitted by viewModel.isVideoSearchSubmitted.collectAsState()
 
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.FEED.name) }
     var selectedVideo by remember { mutableStateOf<VideoEntity?>(null) }
@@ -188,7 +200,14 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
                         onLoadMore = { viewModel.loadMoreFeedVideos() },
                         onVideoClick = { selectedVideo = it },
                         onChannelClick = { selectedChannelId = it },
-                        onGoToChannels = { selectedTab = MainTab.CHANNELS.name }
+                        onGoToChannels = { selectedTab = MainTab.CHANNELS.name },
+                        searchQuery = videoSearchQuery,
+                        isSearching = isSearchingVideos,
+                        searchResults = videoSearchResults,
+                        isSearchSubmitted = isVideoSearchSubmitted,
+                        onSearchQueryChange = { viewModel.onVideoSearchQueryChange(it) },
+                        onSearchSubmit = { viewModel.searchAnyVideo() },
+                        onClearSearch = { viewModel.clearVideoSearch() }
                     )
                     MainTab.SHORTS -> ShortsScreen(
                         viewModel = viewModel,
@@ -257,92 +276,374 @@ private fun FeedScreen(
     onLoadMore: () -> Unit = {},
     onVideoClick: (VideoEntity) -> Unit,
     onChannelClick: (String) -> Unit,
-    onGoToChannels: () -> Unit
+    onGoToChannels: () -> Unit,
+    searchQuery: String,
+    isSearching: Boolean,
+    searchResults: List<VideoEntity>,
+    isSearchSubmitted: Boolean,
+    onSearchQueryChange: (String) -> Unit,
+    onSearchSubmit: () -> Unit,
+    onClearSearch: () -> Unit
 ) {
-    if (channels.isEmpty()) {
-        EmptyState(
-            title = "Your feed is empty",
-            description = "Add the YouTube channels you want to follow. Only their videos will appear here.",
-            buttonText = "Add channels",
-            onButtonClick = onGoToChannels
+    if (isSearchSubmitted || searchQuery.isNotBlank()) {
+        BackHandler {
+            onClearSearch()
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Pinned Search Bar for any video at the top of the feed page
+        FeedVideoSearchBar(
+            query = searchQuery,
+            isSearching = isSearching,
+            onQueryChange = onSearchQueryChange,
+            onSearchSubmit = onSearchSubmit,
+            onClear = onClearSearch
         )
-        return
-    }
 
-    if (videos.isEmpty()) {
-        EmptyState(
-            title = "No videos loaded yet",
-            description = "Refresh your feed to load recent uploads from your selected channels.",
-            buttonText = "Go to My Channels",
-            onButtonClick = onGoToChannels
-        )
-        return
-    }
-
-    val channelMap = remember(channels) { channels.associateBy { it.channelId } }
-    val listState = rememberLazyListState()
-
-    val shouldLoadMore = remember {
-        derivedStateOf {
-            val totalItems = listState.layoutInfo.totalItemsCount
-            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            totalItems > 0 && lastVisibleIndex >= totalItems - 4
-        }
-    }
-    LaunchedEffect(shouldLoadMore.value) {
-        if (shouldLoadMore.value && !isLoadingMore) {
-            onLoadMore()
-        }
-    }
-
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item {
-            Text(
-                "YOUR FEED · ${channels.size} CHANNEL(S) · ${videos.size} VIDEOS",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-        items(videos, key = { it.videoId }) { video ->
-            val channel = channelMap[video.channelId]
-            VideoCard(
-                video = video,
-                channelAvatarUrl = channel?.thumbnailUrl,
-                onVideoClick = { onVideoClick(video) },
-                onChannelClick = onChannelClick
-            )
-        }
-        if (isLoadingMore) {
-            item(key = "loading_more_feed_indicator") {
+        if (isSearchSubmitted) {
+            // YouTube global search results mode
+            if (isSearching && searchResults.isEmpty()) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
+                        .fillMaxSize()
+                        .padding(24.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.primary,
+                            strokeWidth = 2.dp
                         )
                         Text(
-                            "Loading more videos...",
-                            fontSize = 12.sp,
+                            "Searching YouTube for \"$searchQuery\"...",
+                            fontSize = 13.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
+            } else if (searchResults.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            "No videos found",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "No YouTube videos matched \"$searchQuery\". Try a different search term.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedButton(onClick = onClearSearch) {
+                            Text("← Back to Feed")
+                        }
+                    }
+                }
+            } else {
+                val channelMap = remember(channels) { channels.associateBy { it.channelId } }
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    item(key = "search_results_header", contentType = "header") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "SEARCH RESULTS · ${searchResults.size} VIDEOS",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            TextButton(
+                                onClick = onClearSearch,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                            ) {
+                                Text("Back to feed", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    items(
+                        items = searchResults,
+                        key = { it.videoId },
+                        contentType = { "video_card" }
+                    ) { video ->
+                        val channel = channelMap[video.channelId]
+                        VideoCard(
+                            video = video,
+                            channelAvatarUrl = channel?.thumbnailUrl,
+                            onVideoClick = { onVideoClick(video) },
+                            onChannelClick = onChannelClick
+                        )
+                    }
+                }
             }
+        } else if (searchQuery.isNotBlank()) {
+            // Typing mode: Real-time instant feed filter + one-tap YouTube search banner
+            val matchingFeedVideos = remember(videos, searchQuery) {
+                val clean = searchQuery.trim().lowercase()
+                videos.filter {
+                    it.title.lowercase().contains(clean) || it.channelName.lowercase().contains(clean)
+                }
+            }
+            val channelMap = remember(channels) { channels.associateBy { it.channelId } }
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // One-tap shortcut card to search all of YouTube
+                item(key = "search_all_youtube_banner", contentType = "banner") {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSearchSubmit() },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🔍", fontSize = 16.sp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Search YouTube for \"$searchQuery\"",
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "Tap to find any video across YouTube",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text("→", fontSize = 16.sp, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+
+                if (matchingFeedVideos.isNotEmpty()) {
+                    item(key = "matching_feed_header", contentType = "header") {
+                        Text(
+                            "FROM YOUR CHANNELS (${matchingFeedVideos.size})",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                    items(
+                        items = matchingFeedVideos,
+                        key = { it.videoId },
+                        contentType = { "video_card" }
+                    ) { video ->
+                        val channel = channelMap[video.channelId]
+                        VideoCard(
+                            video = video,
+                            channelAvatarUrl = channel?.thumbnailUrl,
+                            onVideoClick = { onVideoClick(video) },
+                            onChannelClick = onChannelClick
+                        )
+                    }
+                } else {
+                    item(key = "no_matching_feed", contentType = "empty") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "No videos in your feed match \"$searchQuery\".\nTap the button above to search all of YouTube.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            // Normal feed mode
+            if (channels.isEmpty()) {
+                EmptyState(
+                    title = "Your feed is empty",
+                    description = "Add the YouTube channels you want to follow, or use the search bar above to watch any video.",
+                    buttonText = "Add channels",
+                    onButtonClick = onGoToChannels
+                )
+            } else if (videos.isEmpty()) {
+                EmptyState(
+                    title = "No videos loaded yet",
+                    description = "Refresh your feed to load recent uploads, or search any video above.",
+                    buttonText = "Go to My Channels",
+                    onButtonClick = onGoToChannels
+                )
+            } else {
+                val channelMap = remember(channels) { channels.associateBy { it.channelId } }
+                val listState = rememberLazyListState()
+
+                LaunchedEffect(listState) {
+                    snapshotFlow {
+                        val totalItems = listState.layoutInfo.totalItemsCount
+                        val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                        totalItems > 0 && lastVisibleIndex >= totalItems - 4
+                    }.distinctUntilChanged().collect { shouldLoad ->
+                        if (shouldLoad && !isLoadingMore) {
+                            onLoadMore()
+                        }
+                    }
+                }
+
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    item(key = "feed_header", contentType = "header") {
+                        Text(
+                            "YOUR FEED · ${channels.size} CHANNEL(S) · ${videos.size} VIDEOS",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    items(
+                        items = videos,
+                        key = { it.videoId },
+                        contentType = { "video_card" }
+                    ) { video ->
+                        val channel = channelMap[video.channelId]
+                        VideoCard(
+                            video = video,
+                            channelAvatarUrl = channel?.thumbnailUrl,
+                            onVideoClick = { onVideoClick(video) },
+                            onChannelClick = onChannelClick
+                        )
+                    }
+                    if (isLoadingMore) {
+                        item(key = "loading_more_feed_indicator", contentType = "loader") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        "Loading more videos...",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeedVideoSearchBar(
+    query: String,
+    isSearching: Boolean,
+    onQueryChange: (String) -> Unit,
+    onSearchSubmit: () -> Unit,
+    onClear: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            modifier = Modifier.weight(1f),
+            placeholder = {
+                Text(
+                    "Search any video...",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(24.dp),
+            leadingIcon = {
+                Text(
+                    "🔍",
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(start = 6.dp)
+                )
+            },
+            trailingIcon = {
+                if (isSearching) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else if (query.isNotBlank()) {
+                    Text(
+                        text = "✕",
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clickable { onClear() }
+                            .padding(8.dp)
+                    )
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onSearchSubmit() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        )
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Button(
+            onClick = onSearchSubmit,
+            enabled = query.isNotBlank() && !isSearching,
+            shape = RoundedCornerShape(24.dp),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            Text("Search", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }
@@ -367,7 +668,8 @@ fun VideoCard(
                     contentDescription = "Thumbnail for ${video.title}",
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(195.dp),
+                        .height(195.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
                     contentScale = ContentScale.Crop
                 )
             } else {
@@ -767,7 +1069,6 @@ private fun PlayerScreen(
     var totalDuration by remember(video.videoId) { mutableFloatStateOf(0f) }
     var isPlaying by remember(video.videoId) { mutableStateOf(false) }
     var isMuted by remember { mutableStateOf(false) }
-    var userDraggingValue by remember(video.videoId) { mutableStateOf<Float?>(null) }
 
     var fullscreenViewRef by remember { mutableStateOf<View?>(null) }
     var exitFullscreenFn by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -938,169 +1239,75 @@ private fun PlayerScreen(
                     )
                 }
 
-                // ── Interactive Scrubber / Slider (Random Click to Seek) ──
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                        val displaySecond = userDraggingValue ?: currentSecond
-                        Slider(
-                            value = displaySecond.coerceIn(0f, totalDuration.coerceAtLeast(1f)),
-                            onValueChange = { newValue ->
-                                userDraggingValue = newValue
-                            },
-                            onValueChangeFinished = {
-                                userDraggingValue?.let { target ->
-                                    playerRef?.seekTo(target)
-                                    playerRef?.unMute()
-                                    playerRef?.setVolume(100)
-                                    playerRef?.play()
-                                    currentSecond = target
-                                    isPlaying = true
-                                    isMuted = false
-                                }
-                                userDraggingValue = null
-                            },
-                            valueRange = 0f..totalDuration.coerceAtLeast(1f),
-                            enabled = totalDuration > 0f,
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color(0xFFFF0000),
-                                activeTrackColor = Color(0xFFFF0000),
-                                inactiveTrackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "${formatDuration(displaySecond)} / ${formatDuration(totalDuration)}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // Sound / Mute Toggle Button
-                                Surface(
-                                    onClick = {
-                                        if (isMuted) {
-                                            playerRef?.unMute()
-                                            playerRef?.setVolume(100)
-                                            isMuted = false
-                                            audioManager?.let { am ->
-                                                val currentVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                                if (currentVol == 0) {
-                                                    val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                                                    am.setStreamVolume(
-                                                        AudioManager.STREAM_MUSIC,
-                                                        (maxVol * 0.75f).toInt().coerceAtLeast(1),
-                                                        AudioManager.FLAG_SHOW_UI
-                                                    )
-                                                }
-                                            }
-                                        } else {
-                                            playerRef?.mute()
-                                            isMuted = true
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = if (isMuted) Color(0xFF444444) else MaterialTheme.colorScheme.surface
-                                ) {
-                                    Text(
-                                        text = if (isMuted) "🔇 Muted" else "🔊 Sound",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isMuted) Color.LightGray else MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                                    )
-                                }
-
-                                // Rewind 10s
-                                Surface(
-                                    onClick = {
-                                        val target = (currentSecond - 10f).coerceAtLeast(0f)
-                                        playerRef?.seekTo(target)
-                                        playerRef?.unMute()
-                                        playerRef?.setVolume(100)
-                                        playerRef?.play()
-                                        currentSecond = target
-                                        isPlaying = true
-                                        isMuted = false
-                                    },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = MaterialTheme.colorScheme.surface
-                                ) {
-                                    Text(
-                                        text = "⏪ 10s",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                                    )
-                                }
-
-                                // Play / Pause Toggle
-                                Surface(
-                                    onClick = {
-                                        if (isPlaying) {
-                                            playerRef?.pause()
-                                            isPlaying = false
-                                        } else {
-                                            playerRef?.unMute()
-                                            playerRef?.setVolume(100)
-                                            playerRef?.play()
-                                            isPlaying = true
-                                            isMuted = false
-                                        }
-                                    },
-                                    shape = CircleShape,
-                                    color = Color(0xFFFF0000)
-                                ) {
-                                    Text(
-                                        text = if (isPlaying) "❚❚" else "▶",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
-                                    )
-                                }
-
-                                // Fast Forward 10s
-                                Surface(
-                                    onClick = {
-                                        val target = (currentSecond + 10f).coerceAtMost(totalDuration)
-                                        playerRef?.seekTo(target)
-                                        playerRef?.unMute()
-                                        playerRef?.setVolume(100)
-                                        playerRef?.play()
-                                        currentSecond = target
-                                        isPlaying = true
-                                        isMuted = false
-                                    },
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = MaterialTheme.colorScheme.surface
-                                ) {
-                                    Text(
-                                        text = "10s ⏩",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                // ── Interactive Scrubber / Slider (Isolated from screen recomposition) ──
+                PlayerScrubberControls(
+                    currentSecond = currentSecond,
+                    totalDuration = totalDuration,
+                    isPlaying = isPlaying,
+                    isMuted = isMuted,
+                    onSeek = { target ->
+                        playerRef?.seekTo(target)
+                        playerRef?.unMute()
+                        playerRef?.setVolume(100)
+                        playerRef?.play()
+                        currentSecond = target
+                        isPlaying = true
+                        isMuted = false
+                    },
+                    onToggleSound = {
+                        if (isMuted) {
+                            playerRef?.unMute()
+                            playerRef?.setVolume(100)
+                            isMuted = false
+                            audioManager?.let { am ->
+                                val currentVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                if (currentVol == 0) {
+                                    val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                                    am.setStreamVolume(
+                                        AudioManager.STREAM_MUSIC,
+                                        (maxVol * 0.75f).toInt().coerceAtLeast(1),
+                                        AudioManager.FLAG_SHOW_UI
                                     )
                                 }
                             }
+                        } else {
+                            playerRef?.mute()
+                            isMuted = true
+                        }
+                    },
+                    onRewind10 = {
+                        val target = (currentSecond - 10f).coerceAtLeast(0f)
+                        playerRef?.seekTo(target)
+                        playerRef?.unMute()
+                        playerRef?.setVolume(100)
+                        playerRef?.play()
+                        currentSecond = target
+                        isPlaying = true
+                        isMuted = false
+                    },
+                    onFastForward10 = {
+                        val target = (currentSecond + 10f).coerceAtMost(totalDuration)
+                        playerRef?.seekTo(target)
+                        playerRef?.unMute()
+                        playerRef?.setVolume(100)
+                        playerRef?.play()
+                        currentSecond = target
+                        isPlaying = true
+                        isMuted = false
+                    },
+                    onTogglePlayPause = {
+                        if (isPlaying) {
+                            playerRef?.pause()
+                            isPlaying = false
+                        } else {
+                            playerRef?.unMute()
+                            playerRef?.setVolume(100)
+                            playerRef?.play()
+                            isPlaying = true
+                            isMuted = false
                         }
                     }
-                }
+                )
 
                 // Compact Title & Channel Information
                 Column(
@@ -1174,6 +1381,63 @@ private fun PlayerScreen(
                         )
                     }
 
+                    // Video Description
+                    var isDescriptionExpanded by remember(video.videoId) { mutableStateOf(false) }
+                    val descriptionText = video.description.trim()
+                    if (descriptionText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { isDescriptionExpanded = !isDescriptionExpanded },
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Description",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = if (isDescriptionExpanded) "Show less ▲" else "...more ▼",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = descriptionText,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    lineHeight = 15.sp,
+                                    maxLines = if (isDescriptionExpanded) Int.MAX_VALUE else 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = if (isDescriptionExpanded) {
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 140.dp)
+                                            .verticalScroll(rememberScrollState())
+                                    } else {
+                                        Modifier.fillMaxWidth()
+                                    }
+                                )
+                            }
+                        }
+                    }
+
                     if (loadState == PlayerLoadState.ERROR) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2C1B1B))) {
@@ -1206,16 +1470,15 @@ private fun PlayerScreen(
         }
         val listState = rememberLazyListState()
 
-        val shouldLoadMore = remember {
-            derivedStateOf {
+        LaunchedEffect(listState) {
+            snapshotFlow {
                 val totalItems = listState.layoutInfo.totalItemsCount
                 val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                 totalItems > 0 && lastVisibleIndex >= totalItems - 4
-            }
-        }
-        LaunchedEffect(shouldLoadMore.value) {
-            if (shouldLoadMore.value && !isLoadingMore) {
-                onLoadMore()
+            }.distinctUntilChanged().collect { shouldLoad ->
+                if (shouldLoad && !isLoadingMore) {
+                    onLoadMore()
+                }
             }
         }
 
@@ -1227,7 +1490,7 @@ private fun PlayerScreen(
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item {
+            item(contentType = "more_header") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1249,7 +1512,11 @@ private fun PlayerScreen(
                 }
             }
 
-            items(feedVideos, key = { it.videoId }) { feedVideo ->
+            items(
+                items = feedVideos,
+                key = { it.videoId },
+                contentType = { "video_card" }
+            ) { feedVideo ->
                 val channel = channelMap[feedVideo.channelId]
                 VideoCard(
                     video = feedVideo,
@@ -1260,7 +1527,7 @@ private fun PlayerScreen(
             }
 
             if (isLoadingMore) {
-                item(key = "loading_more_player_feed_indicator") {
+                item(key = "loading_more_player_feed_indicator", contentType = "loader") {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1282,6 +1549,128 @@ private fun PlayerScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerScrubberControls(
+    currentSecond: Float,
+    totalDuration: Float,
+    isPlaying: Boolean,
+    isMuted: Boolean,
+    onSeek: (Float) -> Unit,
+    onToggleSound: () -> Unit,
+    onRewind10: () -> Unit,
+    onFastForward10: () -> Unit,
+    onTogglePlayPause: () -> Unit
+) {
+    var userDraggingValue by remember { mutableStateOf<Float?>(null) }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            val displaySecond = userDraggingValue ?: currentSecond
+            Slider(
+                value = displaySecond.coerceIn(0f, totalDuration.coerceAtLeast(1f)),
+                onValueChange = { newValue ->
+                    userDraggingValue = newValue
+                },
+                onValueChangeFinished = {
+                    userDraggingValue?.let { target ->
+                        onSeek(target)
+                    }
+                    userDraggingValue = null
+                },
+                valueRange = 0f..totalDuration.coerceAtLeast(1f),
+                enabled = totalDuration > 0f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color(0xFFFF0000),
+                    activeTrackColor = Color(0xFFFF0000),
+                    inactiveTrackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${formatDuration(displaySecond)} / ${formatDuration(totalDuration)}",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Sound / Mute Toggle Button
+                    Surface(
+                        onClick = onToggleSound,
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (isMuted) Color(0xFF444444) else MaterialTheme.colorScheme.surface
+                    ) {
+                        Text(
+                            text = if (isMuted) "🔇 Muted" else "🔊 Sound",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isMuted) Color.LightGray else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                        )
+                    }
+
+                    // Rewind 10s
+                    Surface(
+                        onClick = onRewind10,
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surface
+                    ) {
+                        Text(
+                            text = "⏪ 10s",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                        )
+                    }
+
+                    // Play / Pause Toggle
+                    Surface(
+                        onClick = onTogglePlayPause,
+                        shape = CircleShape,
+                        color = Color(0xFFFF0000)
+                    ) {
+                        Text(
+                            text = if (isPlaying) "❚❚" else "▶",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                        )
+                    }
+
+                    // Fast Forward 10s
+                    Surface(
+                        onClick = onFastForward10,
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surface
+                    ) {
+                        Text(
+                            text = "10s ⏩",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                        )
                     }
                 }
             }

@@ -9,6 +9,8 @@
         android:label="ChannelTube"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
+        android:hardwareAccelerated="true"
+        android:largeHeap="true"
         android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"

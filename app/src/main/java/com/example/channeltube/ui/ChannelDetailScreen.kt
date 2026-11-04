@@ -43,6 +43,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,17 +84,15 @@ fun ChannelDetailScreen(
     val listState = rememberLazyListState()
 
     // Detect when user scrolls near the end to trigger automatic pagination
-    val shouldLoadMore by remember {
-        derivedStateOf {
+    LaunchedEffect(listState) {
+        snapshotFlow {
             val total = listState.layoutInfo.totalItemsCount
             val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             total > 0 && lastVisible >= total - 4
-        }
-    }
-
-    LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore && uiState.hasNextPage && !uiState.isLoadingMore && !uiState.isLoading) {
-            viewModel.loadNextPage()
+        }.distinctUntilChanged().collect { shouldLoadMore ->
+            if (shouldLoadMore && uiState.hasNextPage && !uiState.isLoadingMore && !uiState.isLoading) {
+                viewModel.loadNextPage()
+            }
         }
     }
 
@@ -349,7 +349,11 @@ fun ChannelDetailScreen(
             // Videos / Shorts List
             if (uiState.selectedTab == ChannelTab.SHORTS && !uiState.isSearchMode) {
                 val chunkedShorts = uiState.shortsVideos.chunked(2)
-                items(chunkedShorts, key = { chunk -> "shorts_row_" + chunk.first().videoId }) { row ->
+                items(
+                    items = chunkedShorts,
+                    key = { chunk -> "shorts_row_" + chunk.first().videoId },
+                    contentType = { "shorts_row" }
+                ) { row ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -370,7 +374,11 @@ fun ChannelDetailScreen(
                     }
                 }
             } else {
-                items(uiState.displayedVideos, key = { it.videoId }) { video ->
+                items(
+                    items = uiState.displayedVideos,
+                    key = { it.videoId },
+                    contentType = { "video_card" }
+                ) { video ->
                     VideoCard(
                         video = video,
                         channelAvatarUrl = uiState.profile?.thumbnailUrl,

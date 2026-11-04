@@ -347,6 +347,7 @@ private fun ShortsVerticalPager(
         // ── 2. Vertical Pager (Gesture & Thumbnails) ──
         VerticalPager(
             state = pagerState,
+            beyondViewportPageCount = 1,
             modifier = Modifier.fillMaxSize(),
             key = { page -> if (page < shorts.size) shorts[page].videoId else page }
         ) { page ->
