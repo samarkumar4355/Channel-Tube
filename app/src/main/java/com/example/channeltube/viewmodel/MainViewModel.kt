@@ -13,6 +13,9 @@ import com.example.channeltube.data.remote.YouTubeApi
 import com.example.channeltube.data.repository.ChannelRepository
 import com.example.channeltube.domain.FilterVideosUseCase
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +47,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         filterVideos(allVideos, selectedIds)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    private val _shorts = MutableStateFlow<List<VideoEntity>>(emptyList())
+    val shorts: StateFlow<List<VideoEntity>> = _shorts
+
+    private val _isRefreshingShorts = MutableStateFlow(false)
+    val isRefreshingShorts: StateFlow<Boolean> = _isRefreshingShorts
+
     private val _searchResults = MutableStateFlow<List<ChannelSearchResult>>(emptyList())
     val searchResults: StateFlow<List<ChannelSearchResult>> = _searchResults
 
@@ -53,6 +62,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing
 
+    private val _isLoadingMore = MutableStateFlow(false)
+    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore
+
     private val _workingChannelId = MutableStateFlow<String?>(null)
     val workingChannelId: StateFlow<String?> = _workingChannelId
 
@@ -61,6 +73,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshFeed(showMessage = false)
+        refreshShorts(showMessage = false)
+    }
+
+    fun loadMoreFeedVideos() {
+        if (_isLoadingMore.value || _isRefreshing.value) return
+        val currentChannels = channels.value
+        if (currentChannels.isEmpty()) return
+
+        viewModelScope.launch {
+            _isLoadingMore.value = true
+            try {
+                repository.loadMoreVideosForFeed(currentChannels)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            } finally {
+                _isLoadingMore.value = false
+            }
+        }
     }
 
     fun searchChannels(query: String) {
@@ -134,14 +164,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                for (channel in savedChannels) {
-                    try {
-                        updatedVideos += repository.refreshChannel(channel)
-                        updatedChannels++
-                    } catch (error: Exception) {
-                        if (error is CancellationException) throw error
-                        errors.add(channel.channelName)
-                    }
+                // Query all channels concurrently in parallel with minimum network latency
+                val results = coroutineScope {
+                    savedChannels.map { channel ->
+                        async {
+                            try {
+                                val count = repository.refreshChannel(channel)
+                                Pair(channel.channelName, Result.success(count))
+                            } catch (error: Exception) {
+                                if (error is CancellationException) throw error
+                                Pair(channel.channelName, Result.failure<Int>(error))
+                            }
+                        }
+                    }.awaitAll()
+                }
+
+                for ((channelName, result) in results) {
+                    result.fold(
+                        onSuccess = { count ->
+                            updatedVideos += count
+                            updatedChannels++
+                        },
+                        onFailure = {
+                            errors.add(channelName)
+                        }
+                    )
                 }
 
                 _message.value = when {
@@ -157,6 +204,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _message.value = error.message ?: "Could not refresh the feed."
             } finally {
                 _isRefreshing.value = false
+            }
+        }
+    }
+
+    fun refreshShorts(showMessage: Boolean = false) {
+        if (_isRefreshingShorts.value) return
+        viewModelScope.launch {
+            _isRefreshingShorts.value = true
+            try {
+                val savedChannels = repository.getChannels()
+                if (savedChannels.isEmpty()) {
+                    _shorts.value = emptyList()
+                    return@launch
+                }
+
+                // Query all channel shorts in parallel
+                val results = coroutineScope {
+                    savedChannels.map { channel ->
+                        async {
+                            try {
+                                repository.getChannelShorts(channel.channelId, limit = 10)
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                        }
+                    }.awaitAll()
+                }
+
+                _shorts.value = results.flatten()
+                    .distinctBy { it.videoId }
+                    .sortedByDescending { it.publishedAt }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                if (showMessage) _message.value = error.message ?: "Could not load shorts."
+            } finally {
+                _isRefreshingShorts.value = false
             }
         }
     }

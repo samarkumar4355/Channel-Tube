@@ -63,6 +63,7 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.5")
 
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:13.1.0")
 
     testImplementation("junit:junit:4.13.2")
 }

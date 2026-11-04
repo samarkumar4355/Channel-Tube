@@ -90,5 +90,25 @@ class ChannelDetailRepository(
         }
         return result
     }
+
+    suspend fun getChannelShorts(
+        channelId: String,
+        pageToken: String? = null,
+        channelName: String = ""
+    ): PaginatedVideos {
+        val result = api.getChannelShorts(
+            channelId = channelId,
+            pageToken = pageToken,
+            maxResults = 20,
+            fallbackChannelName = channelName
+        )
+        if (result.videos.isNotEmpty()) {
+            val isChannelSaved = dao.getChannel(channelId) != null
+            if (isChannelSaved) {
+                dao.insertVideos(result.videos)
+            }
+        }
+        return result
+    }
 }
 

@@ -220,6 +220,61 @@ class YouTubeApi(private val apiKey: String) {
         return PaginatedVideos(videos, nextPageToken)
     }
 
+    suspend fun getChannelShorts(
+        channelId: String,
+        pageToken: String? = null,
+        maxResults: Int = 20,
+        fallbackChannelName: String = ""
+    ): PaginatedVideos {
+        ensureApiKey()
+        val params = mutableMapOf(
+            "part" to "snippet",
+            "type" to "video",
+            "channelId" to channelId,
+            "videoDuration" to "short",
+            "order" to "date",
+            "maxResults" to maxResults.toString()
+        )
+        if (!pageToken.isNullOrBlank()) {
+            params["pageToken"] = pageToken
+        }
+
+        val json = getJson("search", params)
+        val nextPageToken = json.optString("nextPageToken").takeIf { it.isNotBlank() }
+        val items = json.optJSONArray("items") ?: return PaginatedVideos(emptyList(), null)
+        val videos = mutableListOf<VideoEntity>()
+
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val idObj = item.optJSONObject("id") ?: continue
+            val videoId = idObj.optString("videoId").orEmpty()
+            if (videoId.isBlank()) continue
+
+            val snippet = item.optJSONObject("snippet") ?: continue
+
+            val itemChannelId = snippet.optString("channelId").orEmpty()
+            if (itemChannelId.isNotBlank() && itemChannelId != channelId) {
+                continue
+            }
+
+            val channelTitle = snippet.optString("channelTitle").takeIf { it.isNotBlank() }
+                ?: fallbackChannelName
+
+            videos.add(
+                VideoEntity(
+                    videoId = videoId,
+                    channelId = channelId,
+                    channelName = channelTitle,
+                    title = decodeHtml(snippet.optString("title", "Untitled Short")),
+                    description = snippet.optString("description", ""),
+                    thumbnailUrl = thumbnailUrl(snippet),
+                    publishedAt = snippet.optString("publishedAt", "")
+                )
+            )
+        }
+        return PaginatedVideos(videos, nextPageToken)
+    }
+
     private suspend fun getChannelDetails(parameter: Pair<String, String>): ChannelSearchResult? {
         val json = getJson(
             "channels",
@@ -279,9 +334,10 @@ class YouTubeApi(private val apiKey: String) {
             val connection = URL(builder.build().toString()).openConnection() as HttpURLConnection
             try {
                 connection.requestMethod = "GET"
-                connection.connectTimeout = 15_000
-                connection.readTimeout = 20_000
+                connection.connectTimeout = 10_000
+                connection.readTimeout = 15_000
                 connection.setRequestProperty("Accept", "application/json")
+                connection.setRequestProperty("Connection", "Keep-Alive")
 
                 val statusCode = connection.responseCode
                 val stream = if (statusCode in 200..299) {
@@ -301,7 +357,8 @@ class YouTubeApi(private val apiKey: String) {
                 }
                 JSONObject(body)
             } finally {
-                connection.disconnect()
+                // Do not call connection.disconnect(); closing the stream puts the underlying
+                // socket into Android's keep-alive connection pool for lightning-fast reuse.
             }
         }
     }

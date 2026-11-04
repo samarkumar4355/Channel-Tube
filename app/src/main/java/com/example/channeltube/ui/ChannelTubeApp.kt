@@ -2,18 +2,32 @@ package com.example.channeltube.ui
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.media.AudioManager
 import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.PlayerConstants
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.AbstractYouTubePlayerListener
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.FullscreenListener
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFramePlayerOptions
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,6 +46,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,14 +61,19 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -80,6 +100,7 @@ import com.example.channeltube.viewmodel.MainViewModel
 
 private enum class MainTab(val label: String, val symbol: String) {
     FEED("Feed", "▶"),
+    SHORTS("Shorts", "⚡"),
     CHANNELS("Channels", "▣"),
     SETTINGS("About", "⚙")
 }
@@ -105,6 +126,7 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
     val videos by viewModel.videos.collectAsState()
     val message by viewModel.message.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
+    val isLoadingMore by viewModel.isLoadingMore.collectAsState()
 
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.FEED.name) }
     var selectedVideo by remember { mutableStateOf<VideoEntity?>(null) }
@@ -113,6 +135,15 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
     if (selectedVideo != null) {
         PlayerScreen(
             video = selectedVideo!!,
+            channels = channels,
+            videos = videos,
+            isLoadingMore = isLoadingMore,
+            onLoadMore = { viewModel.loadMoreFeedVideos() },
+            onVideoSelect = { selectedVideo = it },
+            onChannelClick = {
+                selectedVideo = null
+                selectedChannelId = it
+            },
             onBack = { selectedVideo = null }
         )
     } else if (selectedChannelId != null) {
@@ -142,15 +173,25 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
-                AppHeader(
-                    isRefreshing = isRefreshing,
-                    onRefresh = { viewModel.refreshFeed() }
-                )
+                if (MainTab.valueOf(selectedTab) != MainTab.SHORTS) {
+                    AppHeader(
+                        isRefreshing = isRefreshing,
+                        onRefresh = { viewModel.refreshFeed() }
+                    )
+                }
 
                 when (MainTab.valueOf(selectedTab)) {
                     MainTab.FEED -> FeedScreen(
                         channels = channels,
                         videos = videos,
+                        isLoadingMore = isLoadingMore,
+                        onLoadMore = { viewModel.loadMoreFeedVideos() },
+                        onVideoClick = { selectedVideo = it },
+                        onChannelClick = { selectedChannelId = it },
+                        onGoToChannels = { selectedTab = MainTab.CHANNELS.name }
+                    )
+                    MainTab.SHORTS -> ShortsScreen(
+                        viewModel = viewModel,
                         onVideoClick = { selectedVideo = it },
                         onChannelClick = { selectedChannelId = it },
                         onGoToChannels = { selectedTab = MainTab.CHANNELS.name }
@@ -212,6 +253,8 @@ private fun AppHeader(isRefreshing: Boolean, onRefresh: () -> Unit) {
 private fun FeedScreen(
     channels: List<ChannelEntity>,
     videos: List<VideoEntity>,
+    isLoadingMore: Boolean = false,
+    onLoadMore: () -> Unit = {},
     onVideoClick: (VideoEntity) -> Unit,
     onChannelClick: (String) -> Unit,
     onGoToChannels: () -> Unit
@@ -237,15 +280,30 @@ private fun FeedScreen(
     }
 
     val channelMap = remember(channels) { channels.associateBy { it.channelId } }
+    val listState = rememberLazyListState()
+
+    val shouldLoadMore = remember {
+        derivedStateOf {
+            val totalItems = listState.layoutInfo.totalItemsCount
+            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisibleIndex >= totalItems - 4
+        }
+    }
+    LaunchedEffect(shouldLoadMore.value) {
+        if (shouldLoadMore.value && !isLoadingMore) {
+            onLoadMore()
+        }
+    }
 
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
             Text(
-                "YOUR FEED · ${channels.size} CHANNEL(S)",
+                "YOUR FEED · ${channels.size} CHANNEL(S) · ${videos.size} VIDEOS",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold
@@ -259,6 +317,32 @@ private fun FeedScreen(
                 onVideoClick = { onVideoClick(video) },
                 onChannelClick = onChannelClick
             )
+        }
+        if (isLoadingMore) {
+            item(key = "loading_more_feed_indicator") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            "Loading more videos...",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -605,7 +689,7 @@ private fun AboutScreen(channelCount: Int) {
 }
 
 @Composable
-private fun EmptyState(
+fun EmptyState(
     title: String,
     description: String,
     buttonText: String,
@@ -649,343 +733,674 @@ private fun MessageBanner(message: String, onDismiss: () -> Unit) {
 // In-App Video Player Screen
 // ──────────────────────────────────────────────────────────────────────────────
 
+private tailrec fun android.content.Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 private enum class PlayerLoadState { LOADING, PLAYING, ERROR }
 
 @Composable
-private fun PlayerScreen(video: VideoEntity, onBack: () -> Unit) {
+private fun PlayerScreen(
+    video: VideoEntity,
+    channels: List<ChannelEntity>,
+    videos: List<VideoEntity>,
+    isLoadingMore: Boolean = false,
+    onLoadMore: () -> Unit = {},
+    onVideoSelect: (VideoEntity) -> Unit = {},
+    onChannelClick: (String) -> Unit = {},
+    onBack: () -> Unit
+) {
     val context = LocalContext.current
-    val activity = context as? Activity
-
-    var loadState by remember { mutableStateOf(PlayerLoadState.LOADING) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var isFullscreen by remember { mutableStateOf(false) }
-
-    // References kept for fullscreen toggling and lifecycle cleanup.
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var customViewRef by remember { mutableStateOf<View?>(null) }
-    var customViewCallbackRef by remember {
-        mutableStateOf<WebChromeClient.CustomViewCallback?>(null)
+    val activity = remember(context) { context.findActivity() }
+    val audioManager = remember(context) {
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
 
-    // Exit fullscreen when the hardware back button is pressed.
-    BackHandler(enabled = isFullscreen) {
-        customViewCallbackRef?.onCustomViewHidden()
-        customViewRef = null
-        customViewCallbackRef = null
+    var loadState by remember(video.videoId) { mutableStateOf(PlayerLoadState.LOADING) }
+    var errorMessage by remember(video.videoId) { mutableStateOf<String?>(null) }
+    var isFullscreen by remember { mutableStateOf(false) }
+
+    var playerRef by remember { mutableStateOf<YouTubePlayer?>(null) }
+    var currentSecond by remember(video.videoId) { mutableFloatStateOf(0f) }
+    var totalDuration by remember(video.videoId) { mutableFloatStateOf(0f) }
+    var isPlaying by remember(video.videoId) { mutableStateOf(false) }
+    var isMuted by remember { mutableStateOf(false) }
+    var userDraggingValue by remember(video.videoId) { mutableStateOf<Float?>(null) }
+
+    var fullscreenViewRef by remember { mutableStateOf<View?>(null) }
+    var exitFullscreenFn by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    // Ensure device media volume is not muted or zero so audio is clearly audible
+    LaunchedEffect(Unit) {
+        audioManager?.let { am ->
+            val currentVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (currentVol == 0) {
+                val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                am.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    (maxVol * 0.75f).toInt().coerceAtLeast(1),
+                    AudioManager.FLAG_SHOW_UI
+                )
+            }
+        }
+    }
+
+    fun exitFullscreenInternal() {
+        val rootLayout = activity?.findViewById<FrameLayout>(android.R.id.content)
+        fullscreenViewRef?.let { rootLayout?.removeView(it) }
+        fullscreenViewRef = null
+        exitFullscreenFn = null
         isFullscreen = false
+        activity?.window?.let { window ->
+            val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
+        }
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 
-    // Regular back (not fullscreen) → return to feed.
+    // Exit fullscreen when back button is pressed
+    BackHandler(enabled = isFullscreen) {
+        exitFullscreenFn?.invoke()
+        exitFullscreenInternal()
+    }
+
+    // Regular back → return to feed
     BackHandler(enabled = !isFullscreen) {
         onBack()
     }
 
-    // Pause WebView playback and clean up when the composable leaves.
     DisposableEffect(Unit) {
         onDispose {
-            webViewRef?.onPause()
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            exitFullscreenInternal()
         }
     }
 
-    // Fullscreen overlay – drawn on top of everything when active.
-    if (isFullscreen && customViewRef != null) {
-        AndroidView(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black),
-            factory = { ctx ->
-                FrameLayout(ctx).apply {
-                    addView(
-                        customViewRef,
-                        ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                    )
-                }
-            }
-        )
-        return // Don't render the normal player UI underneath.
-    }
-
-    // Normal (non-fullscreen) player layout.
+    // Normal player layout (kept composed even when in fullscreen so player is never destroyed)
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        // ── Top bar ──
-        TextButton(
-            onClick = onBack,
-            modifier = Modifier.padding(start = 4.dp, top = 8.dp)
+        // ── 1. FIXED TOP PLAYER SECTION ──────────────────────────────────
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 4.dp,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Text("← Back to feed")
-        }
-
-        // ── Embedded player ──
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f),
-            contentAlignment = Alignment.Center
-        ) {
-            // Show thumbnail underneath while loading.
-            if (loadState == PlayerLoadState.LOADING && video.thumbnailUrl.isNotBlank()) {
-                AsyncImage(
-                    model = video.thumbnailUrl,
-                    contentDescription = "Video thumbnail",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            }
-
-            // The WebView player itself.
-            YouTubeEmbeddedPlayer(
-                videoId = video.videoId,
-                onWebViewCreated = { webViewRef = it },
-                onPageStarted = { loadState = PlayerLoadState.LOADING },
-                onPageFinished = {
-                    if (loadState != PlayerLoadState.ERROR) {
-                        loadState = PlayerLoadState.PLAYING
-                    }
-                },
-                onError = { description ->
-                    loadState = PlayerLoadState.ERROR
-                    errorMessage = description
-                },
-                onShowCustomView = { view, callback ->
-                    customViewRef = view
-                    customViewCallbackRef = callback
-                    isFullscreen = true
-                    activity?.requestedOrientation =
-                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                },
-                onHideCustomView = {
-                    customViewCallbackRef?.onCustomViewHidden()
-                    customViewRef = null
-                    customViewCallbackRef = null
-                    isFullscreen = false
-                    activity?.requestedOrientation =
-                        ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                }
-            )
-
-            // Spinner overlay while the iframe is loading.
-            if (loadState == PlayerLoadState.LOADING) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(36.dp),
-                    strokeWidth = 3.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
-
-        // ── Video metadata ──
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            Text(
-                video.title,
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                video.channelName,
-                color = MaterialTheme.colorScheme.primary,
-                fontSize = 14.sp
-            )
-            if (video.publishedAt.isNotBlank()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    video.publishedAt.take(10),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp
-                )
-            }
-
-            // Error banner – shows inside the player screen without redirecting.
-            if (loadState == PlayerLoadState.ERROR) {
-                Spacer(modifier = Modifier.height(14.dp))
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color(0xFF2C1B1B)
-                    )
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Top header bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
+                    TextButton(
+                        onClick = onBack,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
                         Text(
-                            "Playback unavailable",
+                            "← Back to feed",
                             fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFFFF8A80)
+                            fontSize = 13.sp
                         )
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        "Now Playing",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(end = 12.dp)
+                    )
+                }
+
+                // Embedded YouTube player container (16:9)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (loadState == PlayerLoadState.LOADING && video.thumbnailUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = video.thumbnailUrl,
+                            contentDescription = "Video thumbnail",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+
+                    YouTubeEmbeddedPlayer(
+                        videoId = video.videoId,
+                        onPlayerReady = { player ->
+                            playerRef = player
+                            player.unMute()
+                            player.setVolume(100)
+                            isMuted = false
+                            if (loadState != PlayerLoadState.ERROR) {
+                                loadState = PlayerLoadState.PLAYING
+                            }
+                        },
+                        onCurrentSecond = { sec ->
+                            currentSecond = sec
+                            if (loadState == PlayerLoadState.LOADING) {
+                                loadState = PlayerLoadState.PLAYING
+                            }
+                        },
+                        onVideoDuration = { dur ->
+                            totalDuration = dur
+                        },
+                        onStateChange = { state ->
+                            isPlaying = (state == PlayerConstants.PlayerState.PLAYING)
+                            if (state == PlayerConstants.PlayerState.PLAYING ||
+                                state == PlayerConstants.PlayerState.PAUSED
+                            ) {
+                                if (loadState != PlayerLoadState.ERROR) {
+                                    loadState = PlayerLoadState.PLAYING
+                                }
+                            }
+                        },
+                        onError = { description ->
+                            loadState = PlayerLoadState.ERROR
+                            errorMessage = description
+                        },
+                        onEnterFullscreen = { view, exitFs ->
+                            fullscreenViewRef = view
+                            exitFullscreenFn = exitFs
+                            isFullscreen = true
+
+                            val rootLayout = activity?.findViewById<FrameLayout>(android.R.id.content)
+                            (view.parent as? ViewGroup)?.removeView(view)
+                            view.setBackgroundColor(android.graphics.Color.BLACK)
+                            rootLayout?.addView(
+                                view,
+                                FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                )
+                            )
+
+                            activity?.window?.let { window ->
+                                val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+                                insetsController.systemBarsBehavior =
+                                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                                insetsController.hide(WindowInsetsCompat.Type.systemBars())
+                            }
+
+                            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        },
+                        onExitFullscreen = {
+                            exitFullscreenInternal()
+                        }
+                    )
+                }
+
+                // ── Interactive Scrubber / Slider (Random Click to Seek) ──
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                        val displaySecond = userDraggingValue ?: currentSecond
+                        Slider(
+                            value = displaySecond.coerceIn(0f, totalDuration.coerceAtLeast(1f)),
+                            onValueChange = { newValue ->
+                                userDraggingValue = newValue
+                            },
+                            onValueChangeFinished = {
+                                userDraggingValue?.let { target ->
+                                    playerRef?.seekTo(target)
+                                    playerRef?.unMute()
+                                    playerRef?.setVolume(100)
+                                    playerRef?.play()
+                                    currentSecond = target
+                                    isPlaying = true
+                                    isMuted = false
+                                }
+                                userDraggingValue = null
+                            },
+                            valueRange = 0f..totalDuration.coerceAtLeast(1f),
+                            enabled = totalDuration > 0f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color(0xFFFF0000),
+                                activeTrackColor = Color(0xFFFF0000),
+                                inactiveTrackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${formatDuration(displaySecond)} / ${formatDuration(totalDuration)}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Sound / Mute Toggle Button
+                                Surface(
+                                    onClick = {
+                                        if (isMuted) {
+                                            playerRef?.unMute()
+                                            playerRef?.setVolume(100)
+                                            isMuted = false
+                                            audioManager?.let { am ->
+                                                val currentVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                                if (currentVol == 0) {
+                                                    val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                                                    am.setStreamVolume(
+                                                        AudioManager.STREAM_MUSIC,
+                                                        (maxVol * 0.75f).toInt().coerceAtLeast(1),
+                                                        AudioManager.FLAG_SHOW_UI
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            playerRef?.mute()
+                                            isMuted = true
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (isMuted) Color(0xFF444444) else MaterialTheme.colorScheme.surface
+                                ) {
+                                    Text(
+                                        text = if (isMuted) "🔇 Muted" else "🔊 Sound",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isMuted) Color.LightGray else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                    )
+                                }
+
+                                // Rewind 10s
+                                Surface(
+                                    onClick = {
+                                        val target = (currentSecond - 10f).coerceAtLeast(0f)
+                                        playerRef?.seekTo(target)
+                                        playerRef?.unMute()
+                                        playerRef?.setVolume(100)
+                                        playerRef?.play()
+                                        currentSecond = target
+                                        isPlaying = true
+                                        isMuted = false
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.surface
+                                ) {
+                                    Text(
+                                        text = "⏪ 10s",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                    )
+                                }
+
+                                // Play / Pause Toggle
+                                Surface(
+                                    onClick = {
+                                        if (isPlaying) {
+                                            playerRef?.pause()
+                                            isPlaying = false
+                                        } else {
+                                            playerRef?.unMute()
+                                            playerRef?.setVolume(100)
+                                            playerRef?.play()
+                                            isPlaying = true
+                                            isMuted = false
+                                        }
+                                    },
+                                    shape = CircleShape,
+                                    color = Color(0xFFFF0000)
+                                ) {
+                                    Text(
+                                        text = if (isPlaying) "❚❚" else "▶",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                                    )
+                                }
+
+                                // Fast Forward 10s
+                                Surface(
+                                    onClick = {
+                                        val target = (currentSecond + 10f).coerceAtMost(totalDuration)
+                                        playerRef?.seekTo(target)
+                                        playerRef?.unMute()
+                                        playerRef?.setVolume(100)
+                                        playerRef?.play()
+                                        currentSecond = target
+                                        isPlaying = true
+                                        isMuted = false
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.surface
+                                ) {
+                                    Text(
+                                        text = "10s ⏩",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Compact Title & Channel Information
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = video.title,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onChannelClick(video.channelId) }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        val currentChannel = channels.find { it.channelId == video.channelId }
+                        if (!currentChannel?.thumbnailUrl.isNullOrBlank()) {
+                            AsyncImage(
+                                model = currentChannel!!.thumbnailUrl,
+                                contentDescription = "Channel avatar",
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Surface(
+                                modifier = Modifier.size(28.dp),
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = video.channelName.take(1).uppercase(),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = video.channelName,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (video.publishedAt.isNotBlank()) {
+                                Text(
+                                    text = video.publishedAt.take(10),
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                         Text(
-                            errorMessage
-                                ?: "This video cannot be played in the embedded player. The video may be restricted, unavailable, or require viewing on YouTube directly.",
-                            color = Color(0xFFCFCFCF),
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(top = 4.dp)
+                            text = "Channel Profile →",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
                         )
+                    }
+
+                    if (loadState == PlayerLoadState.ERROR) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2C1B1B))) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    "Playback unavailable",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.sp,
+                                    color = Color(0xFFFF8A80)
+                                )
+                                Text(
+                                    errorMessage ?: "This video cannot be played in the embedded player.",
+                                    color = Color(0xFFCFCFCF),
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(14.dp))
-            Text(
-                "Playback is provided by YouTube's embedded player. YouTube controls branding, ads, and playback restrictions.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp,
-                textAlign = TextAlign.Start
-            )
+        // ── 2. SCROLLABLE ADDED VIDEO FEED BELOW THE FIXED PLAYER ──────────
+        val feedVideos = remember(videos, video.videoId) {
+            videos.filter { it.videoId != video.videoId }
+        }
+        val channelMap = remember(channels) {
+            channels.associateBy { it.channelId }
+        }
+        val listState = rememberLazyListState()
+
+        val shouldLoadMore = remember {
+            derivedStateOf {
+                val totalItems = listState.layoutInfo.totalItemsCount
+                val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                totalItems > 0 && lastVisibleIndex >= totalItems - 4
+            }
+        }
+        LaunchedEffect(shouldLoadMore.value) {
+            if (shouldLoadMore.value && !isLoadingMore) {
+                onLoadMore()
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "MORE FROM YOUR CHANNELS",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "${feedVideos.size} videos",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            items(feedVideos, key = { it.videoId }) { feedVideo ->
+                val channel = channelMap[feedVideo.channelId]
+                VideoCard(
+                    video = feedVideo,
+                    channelAvatarUrl = channel?.thumbnailUrl,
+                    onVideoClick = { onVideoSelect(feedVideo) },
+                    onChannelClick = onChannelClick
+                )
+            }
+
+            if (isLoadingMore) {
+                item(key = "loading_more_player_feed_indicator") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "Loading more videos...",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
+fun formatDuration(seconds: Float): String {
+    val totalSec = seconds.toInt().coerceAtLeast(0)
+    val hrs = totalSec / 3600
+    val mins = (totalSec % 3600) / 60
+    val secs = totalSec % 60
+    return if (hrs > 0) {
+        String.format("%d:%02d:%02d", hrs, mins, secs)
+    } else {
+        String.format("%02d:%02d", mins, secs)
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
-// YouTube IFrame WebView Composable
+// YouTube IFrame Player Composable
 // ──────────────────────────────────────────────────────────────────────────────
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun YouTubeEmbeddedPlayer(
+fun YouTubeEmbeddedPlayer(
     videoId: String,
-    onWebViewCreated: (WebView) -> Unit = {},
-    onPageStarted: () -> Unit = {},
-    onPageFinished: () -> Unit = {},
+    modifier: Modifier = Modifier
+        .fillMaxWidth()
+        .aspectRatio(16f / 9f),
+    isForShorts: Boolean = false,
+    onPlayerReady: (YouTubePlayer) -> Unit = {},
     onError: (String?) -> Unit = {},
-    onShowCustomView: (View, WebChromeClient.CustomViewCallback) -> Unit = { _, _ -> },
-    onHideCustomView: () -> Unit = {}
+    onCurrentSecond: (Float) -> Unit = {},
+    onVideoDuration: (Float) -> Unit = {},
+    onStateChange: (PlayerConstants.PlayerState) -> Unit = {},
+    onEnterFullscreen: (View, () -> Unit) -> Unit = { _, _ -> },
+    onExitFullscreen: () -> Unit = {}
 ) {
-    // IDs come from the YouTube API; keep the value URL-safe before placing it in HTML.
     val safeVideoId = remember(videoId) {
         videoId.filter { it.isLetterOrDigit() || it == '_' || it == '-' }
     }
+    var currentLoadedVideoId by remember { mutableStateOf("") }
+
+    // Register active screen callbacks with WarmPlayerManager
+    DisposableEffect(isForShorts) {
+        val callback = object : PlayerEventCallback {
+            override fun onPlayerReady(player: YouTubePlayer) {
+                onPlayerReady(player)
+            }
+            override fun onCurrentSecond(second: Float) {
+                onCurrentSecond(second)
+            }
+            override fun onVideoDuration(duration: Float) {
+                onVideoDuration(duration)
+            }
+            override fun onStateChange(state: PlayerConstants.PlayerState) {
+                onStateChange(state)
+            }
+            override fun onError(description: String?) {
+                onError(description)
+            }
+            override fun onEnterFullscreen(view: View, exitFullscreen: () -> Unit) {
+                onEnterFullscreen(view, exitFullscreen)
+            }
+            override fun onExitFullscreen() {
+                onExitFullscreen()
+            }
+        }
+
+        if (isForShorts) {
+            WarmPlayerManager.shortsCallback = callback
+            if (WarmPlayerManager.isShortsReady) {
+                WarmPlayerManager.shortsPlayer?.let { onPlayerReady(it) }
+            }
+        } else {
+            WarmPlayerManager.mainCallback = callback
+            if (WarmPlayerManager.isMainReady) {
+                WarmPlayerManager.mainPlayer?.let { onPlayerReady(it) }
+            }
+        }
+
+        onDispose {
+            if (isForShorts) {
+                WarmPlayerManager.detachShortsPlayer()
+            } else {
+                WarmPlayerManager.detachMainPlayer()
+            }
+        }
+    }
+
+    // Instant video load and playback on the warm player
+    LaunchedEffect(safeVideoId) {
+        if (safeVideoId.isNotBlank() && safeVideoId != currentLoadedVideoId) {
+            currentLoadedVideoId = safeVideoId
+            val player = if (isForShorts) WarmPlayerManager.shortsPlayer else WarmPlayerManager.mainPlayer
+            player?.loadVideo(safeVideoId, 0f)
+            player?.unMute()
+            player?.setVolume(100)
+            player?.play()
+        }
+    }
+
     AndroidView(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f),
-        factory = { context ->
-            WebView(context).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                setBackgroundColor(android.graphics.Color.BLACK)
-
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    databaseEnabled = true
-                    mediaPlaybackRequiresUserGesture = false
-                    loadWithOverviewMode = true
-                    useWideViewPort = true
-                    allowFileAccess = false
-
-                    // Remove '; wv' from user agent so YouTube does not restrict the embedded player
-                    val defaultUa = userAgentString
-                    if (defaultUa.contains("; wv")) {
-                        userAgentString = defaultUa.replace("; wv", "")
-                    }
-                }
-
-                webViewClient = object : WebViewClient() {
-                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                        super.onPageStarted(view, url, favicon)
-                        onPageStarted()
-                    }
-
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        onPageFinished()
-                    }
-
-                    override fun onReceivedError(
-                        view: WebView?,
-                        request: WebResourceRequest?,
-                        error: WebResourceError?
-                    ) {
-                        super.onReceivedError(view, request, error)
-                        // Only report main-frame errors, not sub-resource loads.
-                        if (request?.isForMainFrame == true) {
-                            val description = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                error?.description?.toString()
-                            } else {
-                                "A network error occurred."
-                            }
-                            onError(description ?: "Failed to load the video player.")
-                        }
-                    }
-
-                    // Only intercept top-level (main frame) navigation attempts away from the player.
-                    // Sub-frame and iframe resources must NEVER be blocked, or YouTube internal scripts fail.
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView?,
-                        request: WebResourceRequest?
-                    ): Boolean {
-                        if (request?.isForMainFrame != true) {
-                            return false
-                        }
-                        val url = request.url?.toString().orEmpty()
-                        if (url.contains("youtube-nocookie.com") ||
-                            url.contains("youtube.com/embed") ||
-                            url.startsWith("data:") ||
-                            url.startsWith("about:")
-                        ) {
-                            return false
-                        }
-                        // Block top-level external navigation (e.g. clicking YouTube logo/links)
-                        return true
-                    }
-                }
-
-                webChromeClient = object : WebChromeClient() {
-                    override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                        if (view != null && callback != null) {
-                            onShowCustomView(view, callback)
-                        }
-                    }
-
-                    override fun onHideCustomView() {
-                        onHideCustomView()
-                    }
-                }
-
-                val html = """
-                    <!doctype html>
-                    <html>
-                    <head>
-                      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                      <style>
-                        * { margin: 0; padding: 0; box-sizing: border-box; }
-                        html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-                        iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
-                      </style>
-                    </head>
-                    <body>
-                      <iframe
-                        id="ytplayer"
-                        src="https://www.youtube-nocookie.com/embed/$safeVideoId?autoplay=1&playsinline=1&rel=0&modestbranding=1"
-                        title="YouTube video player"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
-                        referrerpolicy="strict-origin-when-cross-origin"
-                        allowfullscreen>
-                      </iframe>
-                    </body>
-                    </html>
-                """.trimIndent()
-                loadDataWithBaseURL(
-                    "https://www.youtube-nocookie.com",
-                    html,
-                    "text/html",
-                    "UTF-8",
-                    null
-                )
-
-                onWebViewCreated(this)
+        modifier = modifier,
+        factory = { ctx ->
+            if (isForShorts) {
+                WarmPlayerManager.getShortsPlayerView(ctx)
+            } else {
+                WarmPlayerManager.getMainPlayerView(ctx)
+            }
+        },
+        update = {
+            val player = if (isForShorts) WarmPlayerManager.shortsPlayer else WarmPlayerManager.mainPlayer
+            if (safeVideoId.isNotBlank() && safeVideoId != currentLoadedVideoId) {
+                currentLoadedVideoId = safeVideoId
+                player?.loadVideo(safeVideoId, 0f)
+                player?.unMute()
+                player?.setVolume(100)
+                player?.play()
             }
         }
     )

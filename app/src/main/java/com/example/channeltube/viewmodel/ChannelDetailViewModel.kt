@@ -20,10 +20,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+enum class ChannelTab { VIDEOS, SHORTS }
+
 data class ChannelDetailUiState(
     val profile: ChannelProfile? = null,
+    val selectedTab: ChannelTab = ChannelTab.VIDEOS,
     val uploadsVideos: List<VideoEntity> = emptyList(),
     val uploadsNextPageToken: String? = null,
+    val shortsVideos: List<VideoEntity> = emptyList(),
+    val shortsNextPageToken: String? = null,
+    val isLoadingShorts: Boolean = false,
     val searchVideos: List<VideoEntity> = emptyList(),
     val searchNextPageToken: String? = null,
     val searchQuery: String = "",
@@ -35,8 +41,16 @@ data class ChannelDetailUiState(
     val searchErrorMessage: String? = null
 ) {
     val isSearchMode: Boolean get() = searchQuery.isNotBlank()
-    val displayedVideos: List<VideoEntity> get() = if (isSearchMode) searchVideos else uploadsVideos
-    val hasNextPage: Boolean get() = if (isSearchMode) searchNextPageToken != null else uploadsNextPageToken != null
+    val displayedVideos: List<VideoEntity> get() = when {
+        isSearchMode -> searchVideos
+        selectedTab == ChannelTab.SHORTS -> shortsVideos
+        else -> uploadsVideos
+    }
+    val hasNextPage: Boolean get() = when {
+        isSearchMode -> searchNextPageToken != null
+        selectedTab == ChannelTab.SHORTS -> shortsNextPageToken != null
+        else -> uploadsNextPageToken != null
+    }
 }
 
 class ChannelDetailViewModel(
@@ -131,14 +145,67 @@ class ChannelDetailViewModel(
         }
     }
 
+    fun selectTab(tab: ChannelTab) {
+        if (_uiState.value.selectedTab == tab) return
+        _uiState.value = _uiState.value.copy(selectedTab = tab)
+        if (tab == ChannelTab.SHORTS && _uiState.value.shortsVideos.isEmpty()) {
+            loadShorts()
+        }
+    }
+
+    fun loadShorts() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoadingShorts = true)
+            try {
+                val page = repository.getChannelShorts(
+                    channelId = channelId,
+                    pageToken = null,
+                    channelName = _uiState.value.profile?.channelName.orEmpty()
+                )
+                _uiState.value = _uiState.value.copy(
+                    shortsVideos = page.videos.distinctBy { it.videoId },
+                    shortsNextPageToken = page.nextPageToken
+                )
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+            } finally {
+                _uiState.value = _uiState.value.copy(isLoadingShorts = false)
+            }
+        }
+    }
+
+    private fun loadNextShortsPage() {
+        val nextToken = _uiState.value.shortsNextPageToken ?: return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoadingMore = true)
+            try {
+                val page = repository.getChannelShorts(
+                    channelId = channelId,
+                    pageToken = nextToken,
+                    channelName = _uiState.value.profile?.channelName.orEmpty()
+                )
+                val existingIds = _uiState.value.shortsVideos.map { it.videoId }.toSet()
+                val newVideos = page.videos.filter { it.videoId !in existingIds }
+                _uiState.value = _uiState.value.copy(
+                    shortsVideos = _uiState.value.shortsVideos + newVideos,
+                    shortsNextPageToken = page.nextPageToken
+                )
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+            } finally {
+                _uiState.value = _uiState.value.copy(isLoadingMore = false)
+            }
+        }
+    }
+
     fun loadNextPage() {
         val state = _uiState.value
         if (state.isLoading || state.isLoadingMore || !state.hasNextPage) return
 
-        if (state.isSearchMode) {
-            loadNextSearchPage()
-        } else {
-            loadNextUploadsPage()
+        when {
+            state.isSearchMode -> loadNextSearchPage()
+            state.selectedTab == ChannelTab.SHORTS -> loadNextShortsPage()
+            else -> loadNextUploadsPage()
         }
     }
 

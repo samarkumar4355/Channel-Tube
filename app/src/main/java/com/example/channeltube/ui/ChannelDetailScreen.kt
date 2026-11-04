@@ -27,6 +27,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -58,6 +60,7 @@ import com.example.channeltube.data.local.VideoEntity
 import com.example.channeltube.data.remote.ChannelProfile
 import com.example.channeltube.viewmodel.ChannelDetailViewModel
 import com.example.channeltube.viewmodel.ChannelDetailViewModelFactory
+import com.example.channeltube.viewmodel.ChannelTab
 import java.text.NumberFormat
 import java.util.Locale
 
@@ -135,15 +138,15 @@ fun ChannelDetailScreen(
                 )
             }
 
-            // Section Title
+            // Section Title & Tabs
             item(key = "section_title") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    val count = uiState.displayedVideos.size
-                    if (uiState.isSearchMode) {
+                if (uiState.isSearchMode) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        val count = uiState.displayedVideos.size
                         Text(
                             text = "SEARCH RESULTS ($count)",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -156,12 +159,33 @@ fun ChannelDetailScreen(
                         ) {
                             Text("Show all uploads", fontSize = 12.sp)
                         }
-                    } else {
-                        Text(
-                            text = "ALL UPLOADS ($count)",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = uiState.selectedTab == ChannelTab.VIDEOS,
+                            onClick = { viewModel.selectTab(ChannelTab.VIDEOS) },
+                            label = { Text("Videos (${uiState.uploadsVideos.size})") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                            )
+                        )
+                        FilterChip(
+                            selected = uiState.selectedTab == ChannelTab.SHORTS,
+                            onClick = { viewModel.selectTab(ChannelTab.SHORTS) },
+                            label = {
+                                val countText = if (uiState.shortsVideos.isNotEmpty()) " (${uiState.shortsVideos.size})" else ""
+                                Text("⚡ Shorts / Clips$countText")
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                            )
                         )
                     }
                 }
@@ -272,14 +296,88 @@ fun ChannelDetailScreen(
                 }
             }
 
-            // Videos List
-            items(uiState.displayedVideos, key = { it.videoId }) { video ->
-                VideoCard(
-                    video = video,
-                    channelAvatarUrl = uiState.profile?.thumbnailUrl,
-                    onVideoClick = { onVideoClick(video) },
-                    onChannelClick = { /* Already on this channel's screen */ }
-                )
+            // Shorts Loading / Empty State
+            if (uiState.selectedTab == ChannelTab.SHORTS && !uiState.isSearchMode) {
+                if (uiState.isLoadingShorts && uiState.shortsVideos.isEmpty()) {
+                    item(key = "shorts_loading") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 36.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(32.dp),
+                                    strokeWidth = 3.dp
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    "Loading channel Shorts...",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                    }
+                } else if (!uiState.isLoadingShorts && uiState.shortsVideos.isEmpty()) {
+                    item(key = "shorts_empty") {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("No Shorts found", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    "This channel doesn't appear to have recent Shorts or short clips.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Videos / Shorts List
+            if (uiState.selectedTab == ChannelTab.SHORTS && !uiState.isSearchMode) {
+                val chunkedShorts = uiState.shortsVideos.chunked(2)
+                items(chunkedShorts, key = { chunk -> "shorts_row_" + chunk.first().videoId }) { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        row.forEach { shortVideo ->
+                            Box(modifier = Modifier.weight(1f)) {
+                                ShortCard(
+                                    video = shortVideo,
+                                    channelAvatarUrl = uiState.profile?.thumbnailUrl,
+                                    onVideoClick = { onVideoClick(shortVideo) },
+                                    onChannelClick = { /* Already on this channel */ }
+                                )
+                            }
+                        }
+                        if (row.size == 1) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            } else {
+                items(uiState.displayedVideos, key = { it.videoId }) { video ->
+                    VideoCard(
+                        video = video,
+                        channelAvatarUrl = uiState.profile?.thumbnailUrl,
+                        onVideoClick = { onVideoClick(video) },
+                        onChannelClick = { /* Already on this channel's screen */ }
+                    )
+                }
             }
 
             // Pagination Loading Indicator
