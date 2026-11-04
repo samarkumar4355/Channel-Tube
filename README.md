@@ -114,3 +114,10 @@ app/src/main/java/com/example/channeltube/
 - [PlaylistItems: list](https://developers.google.com/youtube/v3/docs/playlistItems/list)
 - [YouTube IFrame Player API](https://developers.google.com/youtube/iframe_api_reference)
 - [Jetpack Compose setup](https://developer.android.com/develop/ui/compose/setup-compose-dependencies-and-compiler)
+
+
+
+## License
+
+This project is licensed under the MIT License.
+See the [LICENSE](LICENSE) file for details.
