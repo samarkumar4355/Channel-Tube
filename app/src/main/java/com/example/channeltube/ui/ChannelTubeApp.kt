@@ -28,6 +28,9 @@ import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.Abs
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.FullscreenListener
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFramePlayerOptions
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -46,7 +49,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -58,6 +63,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -88,6 +96,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -103,12 +112,14 @@ import com.example.channeltube.R
 import com.example.channeltube.data.local.ChannelEntity
 import com.example.channeltube.data.local.VideoEntity
 import com.example.channeltube.data.remote.ChannelSearchResult
+import com.example.channeltube.data.remote.PlaylistEntity
 import com.example.channeltube.viewmodel.MainViewModel
 
 private enum class MainTab(val label: String, val symbol: String) {
     FEED("Feed", "▶"),
     SHORTS("Shorts", "⚡"),
     CHANNELS("Channels", "▣"),
+    PLAYLISTS("Playlists", "☰"),
     SETTINGS("About", "⚙")
 }
 
@@ -135,6 +146,15 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
 
+    val currentPlaylist by viewModel.currentPlaylist.collectAsState()
+    val playlistVideos by viewModel.playlistVideos.collectAsState()
+    val channelPlaylists by viewModel.channelPlaylists.collectAsState()
+    val isLoadingPlaylists by viewModel.isLoadingPlaylists.collectAsState()
+
+    val customPlaylists by viewModel.customPlaylists.collectAsState()
+    val videoToAddToPlaylist by viewModel.videoToAddToPlaylist.collectAsState()
+    val activeVideoPlaylistIds by viewModel.activeVideoPlaylistIds.collectAsState()
+
     val videoSearchQuery by viewModel.videoSearchQuery.collectAsState()
     val isSearchingVideos by viewModel.isSearchingVideos.collectAsState()
     val videoSearchResults by viewModel.videoSearchResults.collectAsState()
@@ -144,25 +164,50 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
     var selectedVideo by remember { mutableStateOf<VideoEntity?>(null) }
     var selectedChannelId by remember { mutableStateOf<String?>(null) }
 
+    // Pre-cue the first feed video so top video playback is instantaneous (< 50ms)
+    LaunchedEffect(videos) {
+        if (videos.isNotEmpty() && WarmPlayerManager.currentMainVideoId == null) {
+            WarmPlayerManager.cueMainVideo(videos.first().videoId)
+        }
+    }
+
     if (selectedVideo != null) {
         PlayerScreen(
             video = selectedVideo!!,
             channels = channels,
             videos = videos,
+            currentPlaylist = currentPlaylist,
+            playlistVideos = playlistVideos,
+            channelPlaylists = channelPlaylists,
+            isLoadingPlaylists = isLoadingPlaylists,
             isLoadingMore = isLoadingMore,
             onLoadMore = { viewModel.loadMoreFeedVideos() },
-            onVideoSelect = { selectedVideo = it },
+            onVideoSelect = {
+                WarmPlayerManager.playMainVideo(it.videoId)
+                selectedVideo = it
+            },
+            onSelectPlaylist = { playlist -> viewModel.loadPlaylistVideos(playlist) },
+            onClearPlaylist = { viewModel.clearCurrentPlaylist() },
+            onSaveToPlaylist = { viewModel.openAddToPlaylistDialog(it) },
             onChannelClick = {
                 selectedVideo = null
                 selectedChannelId = it
             },
-            onBack = { selectedVideo = null }
+            onBack = {
+                selectedVideo = null
+                viewModel.clearCurrentPlaylist()
+            }
         )
     } else if (selectedChannelId != null) {
         ChannelDetailScreen(
             channelId = selectedChannelId!!,
             onBack = { selectedChannelId = null },
-            onVideoClick = { selectedVideo = it }
+            onVideoClick = { video, playlist, pVideos ->
+                WarmPlayerManager.playMainVideo(video.videoId)
+                viewModel.selectVideoWithPlaylist(video, playlist, pVideos)
+                selectedVideo = video
+            },
+            onSaveToPlaylist = { viewModel.openAddToPlaylistDialog(it) }
         )
     } else {
         Scaffold(
@@ -198,7 +243,11 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
                         videos = videos,
                         isLoadingMore = isLoadingMore,
                         onLoadMore = { viewModel.loadMoreFeedVideos() },
-                        onVideoClick = { selectedVideo = it },
+                        onVideoClick = {
+                            WarmPlayerManager.playMainVideo(it.videoId)
+                            viewModel.selectVideoWithPlaylist(it)
+                            selectedVideo = it
+                        },
                         onChannelClick = { selectedChannelId = it },
                         onGoToChannels = { selectedTab = MainTab.CHANNELS.name },
                         searchQuery = videoSearchQuery,
@@ -207,17 +256,30 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
                         isSearchSubmitted = isVideoSearchSubmitted,
                         onSearchQueryChange = { viewModel.onVideoSearchQueryChange(it) },
                         onSearchSubmit = { viewModel.searchAnyVideo() },
-                        onClearSearch = { viewModel.clearVideoSearch() }
+                        onClearSearch = { viewModel.clearVideoSearch() },
+                        onSaveToPlaylist = { viewModel.openAddToPlaylistDialog(it) }
                     )
                     MainTab.SHORTS -> ShortsScreen(
                         viewModel = viewModel,
-                        onVideoClick = { selectedVideo = it },
+                        onVideoClick = {
+                            WarmPlayerManager.playMainVideo(it.videoId)
+                            viewModel.selectVideoWithPlaylist(it)
+                            selectedVideo = it
+                        },
                         onChannelClick = { selectedChannelId = it },
                         onGoToChannels = { selectedTab = MainTab.CHANNELS.name }
                     )
                     MainTab.CHANNELS -> ChannelsScreen(
                         viewModel = viewModel,
                         onChannelClick = { selectedChannelId = it }
+                    )
+                    MainTab.PLAYLISTS -> PlaylistsScreen(
+                        viewModel = viewModel,
+                        onVideoClick = { video, playlist, pVideos ->
+                            WarmPlayerManager.playMainVideo(video.videoId)
+                            viewModel.selectVideoWithPlaylist(video, playlist, pVideos)
+                            selectedVideo = video
+                        }
                     )
                     MainTab.SETTINGS -> AboutScreen(channelCount = channels.size)
                 }
@@ -230,6 +292,17 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
                 }
             }
         }
+    }
+
+    if (videoToAddToPlaylist != null) {
+        SaveToPlaylistDialog(
+            video = videoToAddToPlaylist!!,
+            playlists = customPlaylists,
+            activePlaylistIds = activeVideoPlaylistIds,
+            onToggle = { plId -> viewModel.toggleVideoInCustomPlaylist(plId, videoToAddToPlaylist!!) },
+            onCreatePlaylist = { title -> viewModel.createCustomPlaylist(title, videoToAddToPlaylist) },
+            onDismiss = { viewModel.closeAddToPlaylistDialog() }
+        )
     }
 }
 
@@ -283,7 +356,8 @@ private fun FeedScreen(
     isSearchSubmitted: Boolean,
     onSearchQueryChange: (String) -> Unit,
     onSearchSubmit: () -> Unit,
-    onClearSearch: () -> Unit
+    onClearSearch: () -> Unit,
+    onSaveToPlaylist: (VideoEntity) -> Unit = {}
 ) {
     if (isSearchSubmitted || searchQuery.isNotBlank()) {
         BackHandler {
@@ -388,7 +462,8 @@ private fun FeedScreen(
                             video = video,
                             channelAvatarUrl = channel?.thumbnailUrl,
                             onVideoClick = { onVideoClick(video) },
-                            onChannelClick = onChannelClick
+                            onChannelClick = onChannelClick,
+                            onSaveToPlaylist = { onSaveToPlaylist(video) }
                         )
                     }
                 }
@@ -461,7 +536,8 @@ private fun FeedScreen(
                             video = video,
                             channelAvatarUrl = channel?.thumbnailUrl,
                             onVideoClick = { onVideoClick(video) },
-                            onChannelClick = onChannelClick
+                            onChannelClick = onChannelClick,
+                            onSaveToPlaylist = { onSaveToPlaylist(video) }
                         )
                     }
                 } else {
@@ -538,7 +614,8 @@ private fun FeedScreen(
                             video = video,
                             channelAvatarUrl = channel?.thumbnailUrl,
                             onVideoClick = { onVideoClick(video) },
-                            onChannelClick = onChannelClick
+                            onChannelClick = onChannelClick,
+                            onSaveToPlaylist = { onSaveToPlaylist(video) }
                         )
                     }
                     if (isLoadingMore) {
@@ -581,16 +658,15 @@ private fun FeedVideoSearchBar(
     onSearchSubmit: () -> Unit,
     onClear: () -> Unit
 ) {
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 16.dp, vertical = 6.dp)
     ) {
         OutlinedTextField(
             value = query,
             onValueChange = onQueryChange,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.fillMaxWidth(),
             placeholder = {
                 Text(
                     "Search any video...",
@@ -634,17 +710,6 @@ private fun FeedVideoSearchBar(
                 unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant
             )
         )
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        Button(
-            onClick = onSearchSubmit,
-            enabled = query.isNotBlank() && !isSearching,
-            shape = RoundedCornerShape(24.dp),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
-        ) {
-            Text("Search", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        }
     }
 }
 
@@ -653,7 +718,8 @@ fun VideoCard(
     video: VideoEntity,
     channelAvatarUrl: String? = null,
     onVideoClick: () -> Unit,
-    onChannelClick: (String) -> Unit
+    onChannelClick: (String) -> Unit,
+    onSaveToPlaylist: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier
@@ -662,24 +728,45 @@ fun VideoCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column {
-            if (video.thumbnailUrl.isNotBlank()) {
-                AsyncImage(
-                    model = video.thumbnailUrl,
-                    contentDescription = "Thumbnail for ${video.title}",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(195.dp)
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentScale = ContentScale.Crop
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(195.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("No thumbnail", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(195.dp)
+            ) {
+                if (video.thumbnailUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = video.thumbnailUrl,
+                        contentDescription = "Thumbnail for ${video.title}",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("No thumbnail", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+
+                if (video.duration.isNotBlank()) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 8.dp, bottom = 8.dp)
+                    ) {
+                        Text(
+                            text = video.duration,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
             Column(modifier = Modifier.padding(14.dp)) {
@@ -743,6 +830,28 @@ fun VideoCard(
                             )
                         }
                     }
+
+                    if (onSaveToPlaylist != null) {
+                        Surface(
+                            onClick = onSaveToPlaylist,
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text("➕", fontSize = 11.sp)
+                                Text(
+                                    text = "Save",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -772,25 +881,60 @@ private fun ChannelsScreen(
             fontSize = 13.sp,
             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
         )
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.fillMaxWidth()) {
             OutlinedTextField(
                 value = query,
-                onValueChange = { query = it },
-                modifier = Modifier.weight(1f),
-                label = { Text("Channel name or URL") },
-                singleLine = true
+                onValueChange = {
+                    query = it
+                    viewModel.onChannelSearchQueryChange(it)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = {
+                    Text(
+                        "Search channel name, URL, or @handle...",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+                leadingIcon = {
+                    Text(
+                        "🔍",
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(start = 6.dp)
+                    )
+                },
+                trailingIcon = {
+                    if (isSearching) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (query.isNotBlank()) {
+                        Text(
+                            text = "✕",
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .clickable {
+                                    query = ""
+                                    viewModel.onChannelSearchQueryChange("")
+                                }
+                                .padding(8.dp)
+                        )
+                    }
+                },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { viewModel.searchChannels(query) }),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant
+                )
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Button(
-                onClick = { viewModel.searchChannels(query) },
-                enabled = query.isNotBlank() && !isSearching
-            ) {
-                if (isSearching) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                } else {
-                    Text("Search")
-                }
-            }
         }
 
         if (results.isNotEmpty()) {
@@ -1048,9 +1192,16 @@ private fun PlayerScreen(
     video: VideoEntity,
     channels: List<ChannelEntity>,
     videos: List<VideoEntity>,
+    currentPlaylist: PlaylistEntity? = null,
+    playlistVideos: List<VideoEntity> = emptyList(),
+    channelPlaylists: List<PlaylistEntity> = emptyList(),
+    isLoadingPlaylists: Boolean = false,
     isLoadingMore: Boolean = false,
     onLoadMore: () -> Unit = {},
     onVideoSelect: (VideoEntity) -> Unit = {},
+    onSelectPlaylist: (PlaylistEntity) -> Unit = {},
+    onClearPlaylist: () -> Unit = {},
+    onSaveToPlaylist: (VideoEntity) -> Unit = {},
     onChannelClick: (String) -> Unit = {},
     onBack: () -> Unit
 ) {
@@ -1062,13 +1213,12 @@ private fun PlayerScreen(
 
     var loadState by remember(video.videoId) { mutableStateOf(PlayerLoadState.LOADING) }
     var errorMessage by remember(video.videoId) { mutableStateOf<String?>(null) }
+    val overlayAlpha by animateFloatAsState(
+        targetValue = if (loadState == PlayerLoadState.LOADING) 1f else 0f,
+        animationSpec = tween(durationMillis = 150),
+        label = "player_thumbnail_alpha"
+    )
     var isFullscreen by remember { mutableStateOf(false) }
-
-    var playerRef by remember { mutableStateOf<YouTubePlayer?>(null) }
-    var currentSecond by remember(video.videoId) { mutableFloatStateOf(0f) }
-    var totalDuration by remember(video.videoId) { mutableFloatStateOf(0f) }
-    var isPlaying by remember(video.videoId) { mutableStateOf(false) }
-    var isMuted by remember { mutableStateOf(false) }
 
     var fullscreenViewRef by remember { mutableStateOf<View?>(null) }
     var exitFullscreenFn by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -1165,37 +1315,21 @@ private fun PlayerScreen(
                         .aspectRatio(16f / 9f),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (loadState == PlayerLoadState.LOADING && video.thumbnailUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = video.thumbnailUrl,
-                            contentDescription = "Video thumbnail",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    }
-
+                    // Base: Warm YouTube player
                     YouTubeEmbeddedPlayer(
                         videoId = video.videoId,
                         onPlayerReady = { player ->
-                            playerRef = player
                             player.unMute()
                             player.setVolume(100)
-                            isMuted = false
-                            if (loadState != PlayerLoadState.ERROR) {
-                                loadState = PlayerLoadState.PLAYING
-                            }
+                            player.play()
                         },
                         onCurrentSecond = { sec ->
-                            currentSecond = sec
-                            if (loadState == PlayerLoadState.LOADING) {
+                            if (sec > 0f && loadState == PlayerLoadState.LOADING) {
                                 loadState = PlayerLoadState.PLAYING
                             }
                         },
-                        onVideoDuration = { dur ->
-                            totalDuration = dur
-                        },
+                        onVideoDuration = { },
                         onStateChange = { state ->
-                            isPlaying = (state == PlayerConstants.PlayerState.PLAYING)
                             if (state == PlayerConstants.PlayerState.PLAYING ||
                                 state == PlayerConstants.PlayerState.PAUSED
                             ) {
@@ -1237,231 +1371,45 @@ private fun PlayerScreen(
                             exitFullscreenInternal()
                         }
                     )
-                }
 
-                // ── Interactive Scrubber / Slider (Isolated from screen recomposition) ──
-                PlayerScrubberControls(
-                    currentSecond = currentSecond,
-                    totalDuration = totalDuration,
-                    isPlaying = isPlaying,
-                    isMuted = isMuted,
-                    onSeek = { target ->
-                        playerRef?.seekTo(target)
-                        playerRef?.unMute()
-                        playerRef?.setVolume(100)
-                        playerRef?.play()
-                        currentSecond = target
-                        isPlaying = true
-                        isMuted = false
-                    },
-                    onToggleSound = {
-                        if (isMuted) {
-                            playerRef?.unMute()
-                            playerRef?.setVolume(100)
-                            isMuted = false
-                            audioManager?.let { am ->
-                                val currentVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                if (currentVol == 0) {
-                                    val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                                    am.setStreamVolume(
-                                        AudioManager.STREAM_MUSIC,
-                                        (maxVol * 0.75f).toInt().coerceAtLeast(1),
-                                        AudioManager.FLAG_SHOW_UI
-                                    )
-                                }
-                            }
-                        } else {
-                            playerRef?.mute()
-                            isMuted = true
-                        }
-                    },
-                    onRewind10 = {
-                        val target = (currentSecond - 10f).coerceAtLeast(0f)
-                        playerRef?.seekTo(target)
-                        playerRef?.unMute()
-                        playerRef?.setVolume(100)
-                        playerRef?.play()
-                        currentSecond = target
-                        isPlaying = true
-                        isMuted = false
-                    },
-                    onFastForward10 = {
-                        val target = (currentSecond + 10f).coerceAtMost(totalDuration)
-                        playerRef?.seekTo(target)
-                        playerRef?.unMute()
-                        playerRef?.setVolume(100)
-                        playerRef?.play()
-                        currentSecond = target
-                        isPlaying = true
-                        isMuted = false
-                    },
-                    onTogglePlayPause = {
-                        if (isPlaying) {
-                            playerRef?.pause()
-                            isPlaying = false
-                        } else {
-                            playerRef?.unMute()
-                            playerRef?.setVolume(100)
-                            playerRef?.play()
-                            isPlaying = true
-                            isMuted = false
-                        }
-                    }
-                )
-
-                // Compact Title & Channel Information
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = video.title,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onChannelClick(video.channelId) }
-                            .padding(vertical = 2.dp)
-                    ) {
-                        val currentChannel = channels.find { it.channelId == video.channelId }
-                        if (!currentChannel?.thumbnailUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = currentChannel!!.thumbnailUrl,
-                                contentDescription = "Channel avatar",
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape),
-                                contentScale = ContentScale.Crop
-                            )
-                        } else {
-                            Surface(
-                                modifier = Modifier.size(28.dp),
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.surfaceVariant
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = video.channelName.take(1).uppercase(),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = video.channelName,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (video.publishedAt.isNotBlank()) {
-                                Text(
-                                    text = video.publishedAt.take(10),
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    // Overlay: YouTube-style instant high-res thumbnail cover
+                    // Stays seamlessly visible until the video actually plays, preventing black flicker!
+                    if (overlayAlpha > 0f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer { alpha = overlayAlpha }
+                        ) {
+                            if (video.thumbnailUrl.isNotBlank()) {
+                                AsyncImage(
+                                    model = video.thumbnailUrl,
+                                    contentDescription = "Video thumbnail",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black)
                                 )
                             }
-                        }
-                        Text(
-                            text = "Channel Profile →",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-
-                    // Video Description
-                    var isDescriptionExpanded by remember(video.videoId) { mutableStateOf(false) }
-                    val descriptionText = video.description.trim()
-                    if (descriptionText.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { isDescriptionExpanded = !isDescriptionExpanded },
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Column(
+                            // YouTube-style red loading bar at bottom edge
+                            LinearProgressIndicator(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Description",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = if (isDescriptionExpanded) "Show less ▲" else "...more ▼",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(3.dp))
-                                Text(
-                                    text = descriptionText,
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    lineHeight = 15.sp,
-                                    maxLines = if (isDescriptionExpanded) Int.MAX_VALUE else 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = if (isDescriptionExpanded) {
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .heightIn(max = 140.dp)
-                                            .verticalScroll(rememberScrollState())
-                                    } else {
-                                        Modifier.fillMaxWidth()
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    if (loadState == PlayerLoadState.ERROR) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2C1B1B))) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Text(
-                                    "Playback unavailable",
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 12.sp,
-                                    color = Color(0xFFFF8A80)
-                                )
-                                Text(
-                                    errorMessage ?: "This video cannot be played in the embedded player.",
-                                    color = Color(0xFFCFCFCF),
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.padding(top = 2.dp)
-                                )
-                            }
+                                    .height(3.dp)
+                                    .align(Alignment.BottomCenter),
+                                color = Color(0xFFFF0000),
+                                trackColor = Color.Transparent
+                            )
                         }
                     }
                 }
             }
         }
 
-        // ── 2. SCROLLABLE ADDED VIDEO FEED BELOW THE FIXED PLAYER ──────────
+        // ── 2. SCROLLABLE VIDEO FEED OR PLAYLIST QUEUE BELOW THE FIXED PLAYER ──
         val feedVideos = remember(videos, video.videoId) {
             videos.filter { it.videoId != video.videoId }
         }
@@ -1470,13 +1418,18 @@ private fun PlayerScreen(
         }
         val listState = rememberLazyListState()
 
+        // Scroll back to top when a new video is loaded so its details are visible
+        LaunchedEffect(video.videoId) {
+            listState.scrollToItem(0)
+        }
+
         LaunchedEffect(listState) {
             snapshotFlow {
                 val totalItems = listState.layoutInfo.totalItemsCount
                 val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                 totalItems > 0 && lastVisibleIndex >= totalItems - 4
             }.distinctUntilChanged().collect { shouldLoad ->
-                if (shouldLoad && !isLoadingMore) {
+                if (shouldLoad && !isLoadingMore && currentPlaylist == null) {
                     onLoadMore()
                 }
             }
@@ -1488,66 +1441,431 @@ private fun PlayerScreen(
                 .fillMaxWidth()
                 .weight(1f),
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            item(contentType = "more_header") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            // ── VIDEO DETAILS (Title, Channel, Description, Save, Playlist chips) ──
+            // Scrolls up seamlessly with the feed videos below the fixed 16:9 player, like real YouTube
+            item(key = "playing_video_details_${video.videoId}", contentType = "video_details") {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        "MORE FROM YOUR CHANNELS",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        "${feedVideos.size} videos",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-
-            items(
-                items = feedVideos,
-                key = { it.videoId },
-                contentType = { "video_card" }
-            ) { feedVideo ->
-                val channel = channelMap[feedVideo.channelId]
-                VideoCard(
-                    video = feedVideo,
-                    channelAvatarUrl = channel?.thumbnailUrl,
-                    onVideoClick = { onVideoSelect(feedVideo) },
-                    onChannelClick = onChannelClick
-                )
-            }
-
-            if (isLoadingMore) {
-                item(key = "loading_more_player_feed_indicator", contentType = "loader") {
-                    Box(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp),
-                        contentAlignment = Alignment.Center
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
                     ) {
+                        Text(
+                            text = video.title,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
                         Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onChannelClick(video.channelId) }
+                                .padding(vertical = 2.dp)
+                        ) {
+                            val currentChannel = channels.find { it.channelId == video.channelId }
+                            if (!currentChannel?.thumbnailUrl.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = currentChannel!!.thumbnailUrl,
+                                    contentDescription = "Channel avatar",
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape),
+                                    contentScale = ContentScale.Crop
+                                )
+                            } else {
+                                Surface(
+                                    modifier = Modifier.size(32.dp),
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = video.channelName.take(1).uppercase(),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = video.channelName,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (video.publishedAt.isNotBlank()) {
+                                    Text(
+                                        text = video.publishedAt.take(10),
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Text(
+                                text = "Channel Profile →",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        // Video Description
+                        var isDescriptionExpanded by remember(video.videoId) { mutableStateOf(false) }
+                        val descriptionText = video.description.trim()
+                        if (descriptionText.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { isDescriptionExpanded = !isDescriptionExpanded },
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Description",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = if (isDescriptionExpanded) "Show less ▲" else "...more ▼",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = descriptionText,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        lineHeight = 15.sp,
+                                        maxLines = if (isDescriptionExpanded) Int.MAX_VALUE else 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = if (isDescriptionExpanded) {
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(max = 140.dp)
+                                                .verticalScroll(rememberScrollState())
+                                        } else {
+                                            Modifier.fillMaxWidth()
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        // Save to Playlist Action Button
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                "Loading more videos...",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Surface(
+                                onClick = { onSaveToPlaylist(video) },
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.clip(RoundedCornerShape(20.dp))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text("➕", fontSize = 12.sp)
+                                    Text(
+                                        text = "Save to Playlist",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+
+                        // Channel Playlists Chips Selector
+                        if (channelPlaylists.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "PLAYLISTS:",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    item {
+                                        FilterChip(
+                                            selected = currentPlaylist == null,
+                                            onClick = onClearPlaylist,
+                                            label = { Text("Feed Videos", fontSize = 11.sp) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                                            )
+                                        )
+                                    }
+                                    items(channelPlaylists, key = { it.playlistId }) { pl ->
+                                        FilterChip(
+                                            selected = currentPlaylist?.playlistId == pl.playlistId,
+                                            onClick = { onSelectPlaylist(pl) },
+                                            label = {
+                                                val count = if (pl.itemCount > 0) " (${pl.itemCount})" else ""
+                                                Text(
+                                                    text = "${pl.title.take(18)}$count",
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (loadState == PlayerLoadState.ERROR) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2C1B1B))) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        "Playback unavailable",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 12.sp,
+                                        color = Color(0xFFFF8A80)
+                                    )
+                                    Text(
+                                        errorMessage ?: "This video cannot be played in the embedded player.",
+                                        color = Color(0xFFCFCFCF),
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (currentPlaylist != null) {
+                // Active Playlist Queue Banner
+                item(key = "playlist_banner", contentType = "playlist_banner") {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "📋 PLAYLIST: ${currentPlaylist.title}",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                val currentIndex = playlistVideos.indexOfFirst { it.videoId == video.videoId }
+                                val indexText = if (currentIndex >= 0) "Video ${currentIndex + 1} of ${playlistVideos.size}" else "${playlistVideos.size} videos"
+                                Text(
+                                    text = "${currentPlaylist.channelTitle} • $indexText",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            TextButton(
+                                onClick = onClearPlaylist,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("Exit Queue", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+
+                if (isLoadingPlaylists && playlistVideos.isEmpty()) {
+                    item(key = "playlist_loading", contentType = "loader") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "Loading playlist videos...",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Sequential playlist items
+                itemsIndexed(
+                    items = playlistVideos,
+                    key = { idx, item -> "pl_${item.videoId}_$idx" },
+                    contentType = { _, _ -> "playlist_item" }
+                ) { idx, plVideo ->
+                    val isNowPlaying = plVideo.videoId == video.videoId
+                    PlaylistItemCard(
+                        index = idx + 1,
+                        video = plVideo,
+                        isPlaying = isNowPlaying,
+                        onClick = { onVideoSelect(plVideo) },
+                        onSaveToPlaylist = { onSaveToPlaylist(plVideo) }
+                    )
+                }
+
+                // Section divider to feed
+                item(contentType = "more_divider") {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "MORE FROM YOUR CHANNELS",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "${feedVideos.size} videos",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                items(
+                    items = feedVideos,
+                    key = { "feed_${it.videoId}" },
+                    contentType = { "video_card" }
+                ) { feedVideo ->
+                    val channel = channelMap[feedVideo.channelId]
+                    VideoCard(
+                        video = feedVideo,
+                        channelAvatarUrl = channel?.thumbnailUrl,
+                        onVideoClick = { onVideoSelect(feedVideo) },
+                        onChannelClick = onChannelClick,
+                        onSaveToPlaylist = { onSaveToPlaylist(feedVideo) }
+                    )
+                }
+            } else {
+                // Normal Feed Videos List
+                item(contentType = "more_header") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "MORE FROM YOUR CHANNELS",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "${feedVideos.size} videos",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                items(
+                    items = feedVideos,
+                    key = { it.videoId },
+                    contentType = { "video_card" }
+                ) { feedVideo ->
+                    val channel = channelMap[feedVideo.channelId]
+                    VideoCard(
+                        video = feedVideo,
+                        channelAvatarUrl = channel?.thumbnailUrl,
+                        onVideoClick = { onVideoSelect(feedVideo) },
+                        onChannelClick = onChannelClick,
+                        onSaveToPlaylist = { onSaveToPlaylist(feedVideo) }
+                    )
+                }
+
+                if (isLoadingMore) {
+                    item(key = "loading_more_player_feed_indicator", contentType = "loader") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "Loading more videos...",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
@@ -1557,121 +1875,123 @@ private fun PlayerScreen(
 }
 
 @Composable
-private fun PlayerScrubberControls(
-    currentSecond: Float,
-    totalDuration: Float,
+private fun PlaylistItemCard(
+    index: Int,
+    video: VideoEntity,
     isPlaying: Boolean,
-    isMuted: Boolean,
-    onSeek: (Float) -> Unit,
-    onToggleSound: () -> Unit,
-    onRewind10: () -> Unit,
-    onFastForward10: () -> Unit,
-    onTogglePlayPause: () -> Unit
+    onClick: () -> Unit,
+    onSaveToPlaylist: (() -> Unit)? = null
 ) {
-    var userDraggingValue by remember { mutableStateOf<Float?>(null) }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(10.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick),
+        color = if (isPlaying) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(8.dp),
+        border = if (isPlaying) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-            val displaySecond = userDraggingValue ?: currentSecond
-            Slider(
-                value = displaySecond.coerceIn(0f, totalDuration.coerceAtLeast(1f)),
-                onValueChange = { newValue ->
-                    userDraggingValue = newValue
-                },
-                onValueChangeFinished = {
-                    userDraggingValue?.let { target ->
-                        onSeek(target)
-                    }
-                    userDraggingValue = null
-                },
-                valueRange = 0f..totalDuration.coerceAtLeast(1f),
-                enabled = totalDuration > 0f,
-                colors = SliderDefaults.colors(
-                    thumbColor = Color(0xFFFF0000),
-                    activeTrackColor = Color(0xFFFF0000),
-                    inactiveTrackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
-                ),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier.width(28.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "${formatDuration(displaySecond)} / ${formatDuration(totalDuration)}",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                if (isPlaying) {
+                    Text("▶", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                } else {
+                    Text(
+                        text = "$index",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Sound / Mute Toggle Button
+            Spacer(modifier = Modifier.width(6.dp))
+
+            Box(
+                modifier = Modifier
+                    .width(112.dp)
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF22242A))
+            ) {
+                if (video.thumbnailUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = video.thumbnailUrl,
+                        contentDescription = "Thumbnail",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+
+                if (video.duration.isNotBlank()) {
                     Surface(
-                        onClick = onToggleSound,
-                        shape = RoundedCornerShape(6.dp),
-                        color = if (isMuted) Color(0xFF444444) else MaterialTheme.colorScheme.surface
+                        color = Color.Black.copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(3.dp),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 4.dp, bottom = 4.dp)
                     ) {
                         Text(
-                            text = if (isMuted) "🔇 Muted" else "🔊 Sound",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isMuted) Color.LightGray else MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                        )
-                    }
-
-                    // Rewind 10s
-                    Surface(
-                        onClick = onRewind10,
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surface
-                    ) {
-                        Text(
-                            text = "⏪ 10s",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                        )
-                    }
-
-                    // Play / Pause Toggle
-                    Surface(
-                        onClick = onTogglePlayPause,
-                        shape = CircleShape,
-                        color = Color(0xFFFF0000)
-                    ) {
-                        Text(
-                            text = if (isPlaying) "❚❚" else "▶",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
+                            text = video.duration,
                             color = Color.White,
-                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
                         )
                     }
+                }
+            }
 
-                    // Fast Forward 10s
-                    Surface(
-                        onClick = onFastForward10,
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surface
-                    ) {
-                        Text(
-                            text = "10s ⏩",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                        )
-                    }
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                if (isPlaying) {
+                    Text(
+                        text = "▶ NOW PLAYING",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
+                Text(
+                    text = video.title,
+                    fontSize = 12.sp,
+                    fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = video.channelName,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            if (onSaveToPlaylist != null) {
+                Surface(
+                    onClick = onSaveToPlaylist,
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(start = 4.dp)
+                ) {
+                    Text(
+                        text = "➕",
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(6.dp)
+                    )
                 }
             }
         }
@@ -1712,7 +2032,6 @@ fun YouTubeEmbeddedPlayer(
     val safeVideoId = remember(videoId) {
         videoId.filter { it.isLetterOrDigit() || it == '_' || it == '-' }
     }
-    var currentLoadedVideoId by remember { mutableStateOf("") }
 
     // Register active screen callbacks with WarmPlayerManager
     DisposableEffect(isForShorts) {
@@ -1761,15 +2080,14 @@ fun YouTubeEmbeddedPlayer(
         }
     }
 
-    // Instant video load and playback on the warm player
+    // Instant video load and playback coordinated via WarmPlayerManager
     LaunchedEffect(safeVideoId) {
-        if (safeVideoId.isNotBlank() && safeVideoId != currentLoadedVideoId) {
-            currentLoadedVideoId = safeVideoId
-            val player = if (isForShorts) WarmPlayerManager.shortsPlayer else WarmPlayerManager.mainPlayer
-            player?.loadVideo(safeVideoId, 0f)
-            player?.unMute()
-            player?.setVolume(100)
-            player?.play()
+        if (safeVideoId.isNotBlank()) {
+            if (isForShorts) {
+                WarmPlayerManager.playShortsVideo(safeVideoId)
+            } else {
+                WarmPlayerManager.playMainVideo(safeVideoId)
+            }
         }
     }
 
@@ -1783,14 +2101,7 @@ fun YouTubeEmbeddedPlayer(
             }
         },
         update = {
-            val player = if (isForShorts) WarmPlayerManager.shortsPlayer else WarmPlayerManager.mainPlayer
-            if (safeVideoId.isNotBlank() && safeVideoId != currentLoadedVideoId) {
-                currentLoadedVideoId = safeVideoId
-                player?.loadVideo(safeVideoId, 0f)
-                player?.unMute()
-                player?.setVolume(100)
-                player?.play()
-            }
+            // Playback state is coordinated via WarmPlayerManager.playMainVideo / playShortsVideo
         }
     )
 }

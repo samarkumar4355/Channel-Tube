@@ -2,6 +2,7 @@ package com.example.channeltube.ui
 
 import android.app.Application
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,12 +20,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,6 +64,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.channeltube.data.local.VideoEntity
 import com.example.channeltube.data.remote.ChannelProfile
+import com.example.channeltube.data.remote.PlaylistEntity
 import com.example.channeltube.viewmodel.ChannelDetailViewModel
 import com.example.channeltube.viewmodel.ChannelDetailViewModelFactory
 import com.example.channeltube.viewmodel.ChannelTab
@@ -70,7 +75,8 @@ import java.util.Locale
 fun ChannelDetailScreen(
     channelId: String,
     onBack: () -> Unit,
-    onVideoClick: (VideoEntity) -> Unit
+    onVideoClick: (VideoEntity, PlaylistEntity?, List<VideoEntity>) -> Unit,
+    onSaveToPlaylist: (VideoEntity) -> Unit = {}
 ) {
     val context = LocalContext.current
     val viewModel: ChannelDetailViewModel = viewModel(
@@ -79,7 +85,13 @@ fun ChannelDetailScreen(
     )
     val uiState by viewModel.uiState.collectAsState()
 
-    BackHandler(onBack = onBack)
+    BackHandler {
+        if (uiState.selectedPlaylist != null) {
+            viewModel.closePlaylist()
+        } else {
+            onBack()
+        }
+    }
 
     val listState = rememberLazyListState()
 
@@ -108,8 +120,17 @@ fun ChannelDetailScreen(
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = onBack) {
-                Text("← Back to feed", fontSize = 14.sp)
+            TextButton(onClick = {
+                if (uiState.selectedPlaylist != null) {
+                    viewModel.closePlaylist()
+                } else {
+                    onBack()
+                }
+            }) {
+                Text(
+                    text = if (uiState.selectedPlaylist != null) "← Back to playlists" else "← Back to feed",
+                    fontSize = 14.sp
+                )
             }
         }
 
@@ -176,11 +197,23 @@ fun ChannelDetailScreen(
                             )
                         )
                         FilterChip(
+                            selected = uiState.selectedTab == ChannelTab.PLAYLISTS,
+                            onClick = { viewModel.selectTab(ChannelTab.PLAYLISTS) },
+                            label = {
+                                val countText = if (uiState.playlists.isNotEmpty()) " (${uiState.playlists.size})" else ""
+                                Text("Playlists$countText")
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                            )
+                        )
+                        FilterChip(
                             selected = uiState.selectedTab == ChannelTab.SHORTS,
                             onClick = { viewModel.selectTab(ChannelTab.SHORTS) },
                             label = {
                                 val countText = if (uiState.shortsVideos.isNotEmpty()) " (${uiState.shortsVideos.size})" else ""
-                                Text("⚡ Shorts / Clips$countText")
+                                Text("⚡ Shorts$countText")
                             },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primary,
@@ -192,7 +225,7 @@ fun ChannelDetailScreen(
             }
 
             // Initial Loading Indicator
-            if (uiState.isLoading && uiState.displayedVideos.isEmpty()) {
+            if (uiState.isLoading && uiState.displayedVideos.isEmpty() && uiState.playlists.isEmpty()) {
                 item(key = "loading_state") {
                     Box(
                         modifier = Modifier
@@ -236,7 +269,7 @@ fun ChannelDetailScreen(
             }
 
             // Error State
-            if (uiState.errorMessage != null && uiState.displayedVideos.isEmpty()) {
+            if (uiState.errorMessage != null && uiState.displayedVideos.isEmpty() && uiState.playlists.isEmpty()) {
                 item(key = "error_state") {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF2C1B1B)),
@@ -292,6 +325,171 @@ fun ChannelDetailScreen(
                                 Text("Clear search")
                             }
                         }
+                    }
+                }
+            }
+
+            // ── PLAYLISTS TAB CONTENT ──────────────────────────────────
+            if (uiState.selectedTab == ChannelTab.PLAYLISTS && !uiState.isSearchMode) {
+                if (uiState.selectedPlaylist == null) {
+                    // List of channel playlists
+                    if (uiState.isLoadingPlaylists && uiState.playlists.isEmpty()) {
+                        item(key = "playlists_loading") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 36.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(32.dp),
+                                        strokeWidth = 3.dp
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        "Loading channel playlists...",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+                    } else if (!uiState.isLoadingPlaylists && uiState.playlists.isEmpty()) {
+                        item(key = "playlists_empty") {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text("No playlists found", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        "This channel doesn't appear to have public playlists.",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        items(
+                            items = uiState.playlists,
+                            key = { it.playlistId },
+                            contentType = { "playlist_card" }
+                        ) { playlist ->
+                            PlaylistCard(
+                                playlist = playlist,
+                                onClick = { viewModel.openPlaylist(playlist) }
+                            )
+                        }
+                    }
+                } else {
+                    // Inside selected playlist: Header & videos
+                    val selectedPlaylist = uiState.selectedPlaylist!!
+                    item(key = "selected_playlist_header") {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "PLAYLIST",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    TextButton(
+                                        onClick = { viewModel.closePlaylist() },
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("← Back to playlists", fontSize = 12.sp)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = selectedPlaylist.title,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "${uiState.profile?.channelName.orEmpty()} • ${uiState.selectedPlaylistVideos.size} videos",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Button(
+                                    onClick = {
+                                        if (uiState.selectedPlaylistVideos.isNotEmpty()) {
+                                            onVideoClick(
+                                                uiState.selectedPlaylistVideos.first(),
+                                                selectedPlaylist,
+                                                uiState.selectedPlaylistVideos
+                                            )
+                                        }
+                                    },
+                                    enabled = uiState.selectedPlaylistVideos.isNotEmpty(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("▶ Play All (${uiState.selectedPlaylistVideos.size} videos)", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+
+                    if (uiState.isLoadingPlaylistVideos && uiState.selectedPlaylistVideos.isEmpty()) {
+                        item(key = "playlist_videos_loading") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 36.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(32.dp),
+                                        strokeWidth = 3.dp
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        "Loading videos in playlist...",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    itemsIndexed(
+                        items = uiState.selectedPlaylistVideos,
+                        key = { idx, item -> "plv_${item.videoId}_$idx" },
+                        contentType = { _, _ -> "playlist_video_row" }
+                    ) { idx, videoItem ->
+                        PlaylistItemRow(
+                            index = idx + 1,
+                            video = videoItem,
+                            onClick = {
+                                onVideoClick(videoItem, selectedPlaylist, uiState.selectedPlaylistVideos)
+                            },
+                            onSaveToPlaylist = { onSaveToPlaylist(videoItem) }
+                        )
                     }
                 }
             }
@@ -363,8 +561,9 @@ fun ChannelDetailScreen(
                                 ShortCard(
                                     video = shortVideo,
                                     channelAvatarUrl = uiState.profile?.thumbnailUrl,
-                                    onVideoClick = { onVideoClick(shortVideo) },
-                                    onChannelClick = { /* Already on this channel */ }
+                                    onVideoClick = { onVideoClick(shortVideo, null, emptyList()) },
+                                    onChannelClick = { /* Already on this channel */ },
+                                    onSaveToPlaylist = { onSaveToPlaylist(shortVideo) }
                                 )
                             }
                         }
@@ -373,7 +572,7 @@ fun ChannelDetailScreen(
                         }
                     }
                 }
-            } else {
+            } else if (uiState.selectedTab == ChannelTab.VIDEOS || uiState.isSearchMode) {
                 items(
                     items = uiState.displayedVideos,
                     key = { it.videoId },
@@ -382,8 +581,9 @@ fun ChannelDetailScreen(
                     VideoCard(
                         video = video,
                         channelAvatarUrl = uiState.profile?.thumbnailUrl,
-                        onVideoClick = { onVideoClick(video) },
-                        onChannelClick = { /* Already on this channel's screen */ }
+                        onVideoClick = { onVideoClick(video, null, emptyList()) },
+                        onChannelClick = { /* Already on this channel's screen */ },
+                        onSaveToPlaylist = { onSaveToPlaylist(video) }
                     )
                 }
             }
@@ -401,6 +601,189 @@ fun ChannelDetailScreen(
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(28.dp),
                             strokeWidth = 2.dp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaylistCard(
+    playlist: PlaylistEntity,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .background(Color(0xFF1E1E24))
+            ) {
+                if (playlist.thumbnailUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = playlist.thumbnailUrl,
+                        contentDescription = playlist.title,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+
+                // YouTube-style playlist badge on bottom-right
+                Surface(
+                    color = Color.Black.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(topStart = 8.dp),
+                    modifier = Modifier.align(Alignment.BottomEnd)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text("☰", color = Color.White, fontSize = 12.sp)
+                        Text(
+                            text = if (playlist.itemCount > 0) "${playlist.itemCount} videos" else "Playlist",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = playlist.title,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "${playlist.channelTitle} • Playlist",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaylistItemRow(
+    index: Int,
+    video: VideoEntity,
+    onClick: () -> Unit,
+    onSaveToPlaylist: (() -> Unit)? = null
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier.width(28.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "$index",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            Box(
+                modifier = Modifier
+                    .width(112.dp)
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF22242A))
+            ) {
+                if (video.thumbnailUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = video.thumbnailUrl,
+                        contentDescription = "Thumbnail",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+
+                if (video.duration.isNotBlank()) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(3.dp),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 4.dp, bottom = 4.dp)
+                    ) {
+                        Text(
+                            text = video.duration,
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = video.title,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (video.publishedAt.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = video.publishedAt.take(10),
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            if (onSaveToPlaylist != null) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clickable(onClick = onSaveToPlaylist)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "➕",
+                            fontSize = 12.sp
                         )
                     }
                 }
@@ -520,18 +903,24 @@ private fun ChannelVideoSearchBar(
     onSearchSubmit: () -> Unit,
     onClear: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
+    Box(
+        modifier = Modifier.fillMaxWidth()
     ) {
         OutlinedTextField(
             value = query,
             onValueChange = onQueryChange,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.fillMaxWidth(),
             label = { Text("Search this channel's videos") },
             placeholder = { Text("e.g. Python, Tutorial, Review") },
             singleLine = true,
             shape = RoundedCornerShape(10.dp),
+            leadingIcon = {
+                Text(
+                    "🔍",
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(start = 6.dp)
+                )
+            },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { onSearchSubmit() }),
             trailingIcon = {
@@ -553,16 +942,6 @@ private fun ChannelVideoSearchBar(
                 }
             }
         )
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        Button(
-            onClick = onSearchSubmit,
-            enabled = query.isNotBlank() && !isSearching,
-            shape = RoundedCornerShape(10.dp)
-        ) {
-            Text("Search")
-        }
     }
 }
 

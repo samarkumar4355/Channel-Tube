@@ -35,15 +35,71 @@ object WarmPlayerManager {
         private set
     var isMainReady: Boolean = false
         private set
+    var currentMainVideoId: String? = null
+        private set
 
     private var shortsPlayerView: YouTubePlayerView? = null
     var shortsPlayer: YouTubePlayer? = null
         private set
     var isShortsReady: Boolean = false
         private set
+    var currentShortsVideoId: String? = null
+        private set
 
     var mainCallback: PlayerEventCallback? = null
     var shortsCallback: PlayerEventCallback? = null
+
+    fun playMainVideo(videoId: String, startSeconds: Float = 0f) {
+        val safeId = videoId.filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+        if (safeId.isBlank()) return
+
+        if (currentMainVideoId == safeId && isMainReady) {
+            mainPlayer?.unMute()
+            mainPlayer?.setVolume(100)
+            mainPlayer?.play()
+            return
+        }
+
+        currentMainVideoId = safeId
+        if (isMainReady) {
+            mainPlayer?.unMute()
+            mainPlayer?.setVolume(100)
+            mainPlayer?.loadVideo(safeId, startSeconds)
+            mainPlayer?.play()
+            mainPlayerView?.let { suppressYouTubeSpinner(it) }
+        }
+    }
+
+    fun cueMainVideo(videoId: String, startSeconds: Float = 0f) {
+        val safeId = videoId.filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+        if (safeId.isBlank() || currentMainVideoId != null) return
+        if (isMainReady) {
+            currentMainVideoId = safeId
+            mainPlayer?.cueVideo(safeId, startSeconds)
+            mainPlayerView?.let { suppressYouTubeSpinner(it) }
+        }
+    }
+
+    fun playShortsVideo(videoId: String, startSeconds: Float = 0f) {
+        val safeId = videoId.filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+        if (safeId.isBlank()) return
+
+        if (currentShortsVideoId == safeId && isShortsReady) {
+            shortsPlayer?.unMute()
+            shortsPlayer?.setVolume(100)
+            shortsPlayer?.play()
+            return
+        }
+
+        currentShortsVideoId = safeId
+        if (isShortsReady) {
+            shortsPlayer?.unMute()
+            shortsPlayer?.setVolume(100)
+            shortsPlayer?.loadVideo(safeId, startSeconds)
+            shortsPlayer?.play()
+            shortsPlayerView?.let { suppressYouTubeSpinner(it) }
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     fun init(activity: Activity) {
@@ -100,9 +156,17 @@ object WarmPlayerManager {
                     if (isForShorts) {
                         shortsPlayer = youTubePlayer
                         isShortsReady = true
+                        currentShortsVideoId?.let { id ->
+                            youTubePlayer.loadVideo(id, 0f)
+                            youTubePlayer.play()
+                        }
                     } else {
                         mainPlayer = youTubePlayer
                         isMainReady = true
+                        currentMainVideoId?.let { id ->
+                            youTubePlayer.loadVideo(id, 0f)
+                            youTubePlayer.play()
+                        }
                     }
                     youTubePlayer.unMute()
                     youTubePlayer.setVolume(100)
@@ -160,6 +224,7 @@ object WarmPlayerManager {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            databaseEnabled = true
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
@@ -167,12 +232,40 @@ object WarmPlayerManager {
             allowContentAccess = true
             allowFileAccessFromFileURLs = true
             allowUniversalAccessFromFileURLs = true
+            offscreenPreRaster = true
             val ua = userAgentString
             if (ua.contains("; wv")) {
                 userAgentString = ua.replace("; wv", "")
             }
         }
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
+        val preconnectJs = """
+            (function() {
+                var domains = [
+                    'https://www.youtube.com',
+                    'https://googlevideo.com',
+                    'https://i.ytimg.com',
+                    'https://fonts.gstatic.com'
+                ];
+                domains.forEach(function(u) {
+                    try {
+                        var d = document.createElement('link');
+                        d.rel = 'dns-prefetch';
+                        d.href = u;
+                        (document.head || document.documentElement).appendChild(d);
+                        var p = document.createElement('link');
+                        p.rel = 'preconnect';
+                        p.href = u;
+                        p.crossOrigin = 'anonymous';
+                        (document.head || document.documentElement).appendChild(p);
+                    } catch(e) {}
+                });
+            })();
+        """.trimIndent()
+        webView.post {
+            webView.evaluateJavascript(preconnectJs, null)
+        }
     }
 
     fun suppressYouTubeSpinner(playerView: YouTubePlayerView?) {
@@ -270,11 +363,13 @@ object WarmPlayerManager {
             mainPlayerView = null
             mainPlayer = null
             isMainReady = false
+            currentMainVideoId = null
 
             shortsPlayerView?.release()
             shortsPlayerView = null
             shortsPlayer = null
             isShortsReady = false
+            currentShortsVideoId = null
         } catch (_: Exception) {}
     }
 }

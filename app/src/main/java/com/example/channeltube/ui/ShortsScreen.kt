@@ -804,7 +804,8 @@ fun ShortCard(
     video: VideoEntity,
     channelAvatarUrl: String? = null,
     onVideoClick: () -> Unit,
-    onChannelClick: (String) -> Unit
+    onChannelClick: (String) -> Unit,
+    onSaveToPlaylist: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier
@@ -874,6 +875,24 @@ fun ShortCard(
                         overflow = TextOverflow.Ellipsis,
                         lineHeight = 17.sp
                     )
+                }
+
+                if (video.duration.isNotBlank()) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.82f),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 8.dp, bottom = 8.dp)
+                    ) {
+                        Text(
+                            text = video.duration,
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
 

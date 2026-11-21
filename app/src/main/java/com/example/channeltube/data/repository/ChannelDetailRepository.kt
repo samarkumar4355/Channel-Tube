@@ -4,7 +4,9 @@ import com.example.channeltube.data.local.AppDao
 import com.example.channeltube.data.local.ChannelEntity
 import com.example.channeltube.data.local.VideoEntity
 import com.example.channeltube.data.remote.ChannelProfile
+import com.example.channeltube.data.remote.PaginatedPlaylists
 import com.example.channeltube.data.remote.PaginatedVideos
+import com.example.channeltube.data.remote.PlaylistEntity
 import com.example.channeltube.data.remote.YouTubeApi
 import kotlinx.coroutines.flow.Flow
 
@@ -109,6 +111,27 @@ class ChannelDetailRepository(
             }
         }
         return result
+    }
+
+    suspend fun getChannelPlaylists(
+        channelId: String,
+        pageToken: String? = null
+    ): PaginatedPlaylists {
+        return api.getChannelPlaylists(channelId, pageToken)
+    }
+
+    suspend fun getPlaylistVideos(
+        playlistId: String,
+        pageToken: String? = null,
+        channelName: String = "",
+        channelId: String = ""
+    ): PaginatedVideos {
+        return api.getPlaylistVideos(
+            playlistId = playlistId,
+            pageToken = pageToken,
+            fallbackChannelName = channelName,
+            channelId = channelId
+        )
     }
 }
 

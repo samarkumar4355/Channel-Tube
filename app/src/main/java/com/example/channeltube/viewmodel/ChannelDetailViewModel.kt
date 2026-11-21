@@ -10,6 +10,7 @@ import com.example.channeltube.BuildConfig
 import com.example.channeltube.data.local.AppDatabase
 import com.example.channeltube.data.local.VideoEntity
 import com.example.channeltube.data.remote.ChannelProfile
+import com.example.channeltube.data.remote.PlaylistEntity
 import com.example.channeltube.data.remote.YouTubeApi
 import com.example.channeltube.data.repository.ChannelDetailRepository
 import kotlinx.coroutines.CancellationException
@@ -20,13 +21,19 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-enum class ChannelTab { VIDEOS, SHORTS }
+enum class ChannelTab { VIDEOS, PLAYLISTS, SHORTS }
 
 data class ChannelDetailUiState(
     val profile: ChannelProfile? = null,
     val selectedTab: ChannelTab = ChannelTab.VIDEOS,
     val uploadsVideos: List<VideoEntity> = emptyList(),
     val uploadsNextPageToken: String? = null,
+    val playlists: List<PlaylistEntity> = emptyList(),
+    val playlistsNextPageToken: String? = null,
+    val isLoadingPlaylists: Boolean = false,
+    val selectedPlaylist: PlaylistEntity? = null,
+    val selectedPlaylistVideos: List<VideoEntity> = emptyList(),
+    val isLoadingPlaylistVideos: Boolean = false,
     val shortsVideos: List<VideoEntity> = emptyList(),
     val shortsNextPageToken: String? = null,
     val isLoadingShorts: Boolean = false,
@@ -44,11 +51,13 @@ data class ChannelDetailUiState(
     val displayedVideos: List<VideoEntity> get() = when {
         isSearchMode -> searchVideos
         selectedTab == ChannelTab.SHORTS -> shortsVideos
+        selectedTab == ChannelTab.PLAYLISTS && selectedPlaylist != null -> selectedPlaylistVideos
         else -> uploadsVideos
     }
     val hasNextPage: Boolean get() = when {
         isSearchMode -> searchNextPageToken != null
         selectedTab == ChannelTab.SHORTS -> shortsNextPageToken != null
+        selectedTab == ChannelTab.PLAYLISTS && selectedPlaylist == null -> playlistsNextPageToken != null
         else -> uploadsNextPageToken != null
     }
 }
@@ -62,7 +71,7 @@ class ChannelDetailViewModel(
         application,
         AppDatabase::class.java,
         "channel_tube.db"
-    ).build()
+    ).addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3).fallbackToDestructiveMigration().build()
 
     private val repository = ChannelDetailRepository(
         api = YouTubeApi(BuildConfig.YOUTUBE_API_KEY),
@@ -148,9 +157,86 @@ class ChannelDetailViewModel(
     fun selectTab(tab: ChannelTab) {
         if (_uiState.value.selectedTab == tab) return
         _uiState.value = _uiState.value.copy(selectedTab = tab)
+        if (tab == ChannelTab.PLAYLISTS && _uiState.value.playlists.isEmpty()) {
+            loadPlaylists()
+        }
         if (tab == ChannelTab.SHORTS && _uiState.value.shortsVideos.isEmpty()) {
             loadShorts()
         }
+    }
+
+    fun loadPlaylists() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoadingPlaylists = true)
+            try {
+                val page = repository.getChannelPlaylists(
+                    channelId = channelId,
+                    pageToken = null
+                )
+                _uiState.value = _uiState.value.copy(
+                    playlists = page.playlists.distinctBy { it.playlistId },
+                    playlistsNextPageToken = page.nextPageToken
+                )
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+            } finally {
+                _uiState.value = _uiState.value.copy(isLoadingPlaylists = false)
+            }
+        }
+    }
+
+    private fun loadNextPlaylistsPage() {
+        val nextToken = _uiState.value.playlistsNextPageToken ?: return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoadingMore = true)
+            try {
+                val page = repository.getChannelPlaylists(
+                    channelId = channelId,
+                    pageToken = nextToken
+                )
+                val existingIds = _uiState.value.playlists.map { it.playlistId }.toSet()
+                val newPlaylists = page.playlists.filter { it.playlistId !in existingIds }
+                _uiState.value = _uiState.value.copy(
+                    playlists = _uiState.value.playlists + newPlaylists,
+                    playlistsNextPageToken = page.nextPageToken
+                )
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+            } finally {
+                _uiState.value = _uiState.value.copy(isLoadingMore = false)
+            }
+        }
+    }
+
+    fun openPlaylist(playlist: PlaylistEntity) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                selectedPlaylist = playlist,
+                selectedPlaylistVideos = emptyList(),
+                isLoadingPlaylistVideos = true
+            )
+            try {
+                val page = repository.getPlaylistVideos(
+                    playlistId = playlist.playlistId,
+                    channelName = playlist.channelTitle.ifBlank { _uiState.value.profile?.channelName.orEmpty() },
+                    channelId = channelId
+                )
+                _uiState.value = _uiState.value.copy(
+                    selectedPlaylistVideos = page.videos.distinctBy { it.videoId }
+                )
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+            } finally {
+                _uiState.value = _uiState.value.copy(isLoadingPlaylistVideos = false)
+            }
+        }
+    }
+
+    fun closePlaylist() {
+        _uiState.value = _uiState.value.copy(
+            selectedPlaylist = null,
+            selectedPlaylistVideos = emptyList()
+        )
     }
 
     fun loadShorts() {
@@ -205,6 +291,7 @@ class ChannelDetailViewModel(
         when {
             state.isSearchMode -> loadNextSearchPage()
             state.selectedTab == ChannelTab.SHORTS -> loadNextShortsPage()
+            state.selectedTab == ChannelTab.PLAYLISTS && state.selectedPlaylist == null -> loadNextPlaylistsPage()
             else -> loadNextUploadsPage()
         }
     }

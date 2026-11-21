@@ -24,5 +24,6 @@ data class VideoEntity(
     val title: String,
     val description: String,
     val thumbnailUrl: String,
-    val publishedAt: String
+    val publishedAt: String,
+    val duration: String = ""
 )

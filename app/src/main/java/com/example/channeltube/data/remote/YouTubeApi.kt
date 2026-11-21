@@ -9,6 +9,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 
 /** A small YouTube Data API v3 client. All network work runs on Dispatchers.IO. */
 class YouTubeApi(private val apiKey: String) {
@@ -161,7 +162,7 @@ class YouTubeApi(private val apiKey: String) {
                 )
             )
         }
-        return PaginatedVideos(videos, nextPageToken)
+        return PaginatedVideos(populateDurations(videos), nextPageToken)
     }
 
     suspend fun searchVideos(
@@ -208,7 +209,7 @@ class YouTubeApi(private val apiKey: String) {
                 )
             )
         }
-        return PaginatedVideos(videos, nextPageToken)
+        return PaginatedVideos(populateDurations(videos), nextPageToken)
     }
 
     suspend fun searchChannelVideos(
@@ -264,7 +265,7 @@ class YouTubeApi(private val apiKey: String) {
                 )
             )
         }
-        return PaginatedVideos(videos, nextPageToken)
+        return PaginatedVideos(populateDurations(videos), nextPageToken)
     }
 
     suspend fun getChannelShorts(
@@ -319,7 +320,7 @@ class YouTubeApi(private val apiKey: String) {
                 )
             )
         }
-        return PaginatedVideos(videos, nextPageToken)
+        return PaginatedVideos(populateDurations(videos), nextPageToken)
     }
 
     private suspend fun getChannelDetails(parameter: Pair<String, String>): ChannelSearchResult? {
@@ -410,6 +411,123 @@ class YouTubeApi(private val apiKey: String) {
         }
     }
 
+    suspend fun getChannelPlaylists(
+        channelId: String,
+        pageToken: String? = null,
+        maxResults: Int = 25
+    ): PaginatedPlaylists {
+        ensureApiKey()
+        val params = mutableMapOf(
+            "part" to "snippet,contentDetails",
+            "channelId" to channelId,
+            "maxResults" to maxResults.toString()
+        )
+        if (!pageToken.isNullOrBlank()) {
+            params["pageToken"] = pageToken
+        }
+
+        val json = getJson("playlists", params)
+        val nextPageToken = json.optString("nextPageToken").takeIf { it.isNotBlank() }
+        val items = json.optJSONArray("items") ?: return PaginatedPlaylists(emptyList(), null)
+        val playlists = mutableListOf<PlaylistEntity>()
+
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val id = item.optString("id").orEmpty()
+            if (id.isBlank()) continue
+
+            val snippet = item.optJSONObject("snippet") ?: continue
+            val contentDetails = item.optJSONObject("contentDetails")
+            val itemCount = contentDetails?.optInt("itemCount", 0) ?: 0
+            val title = decodeHtml(snippet.optString("title", "Untitled Playlist"))
+            val description = snippet.optString("description", "")
+            val resolvedChannelId = snippet.optString("channelId").ifBlank { channelId }
+            val channelTitle = snippet.optString("channelTitle", "")
+
+            playlists.add(
+                PlaylistEntity(
+                    playlistId = id,
+                    channelId = resolvedChannelId,
+                    channelTitle = channelTitle,
+                    title = title,
+                    description = description,
+                    thumbnailUrl = thumbnailUrl(snippet),
+                    itemCount = itemCount
+                )
+            )
+        }
+        return PaginatedPlaylists(playlists, nextPageToken)
+    }
+
+    suspend fun getPlaylistVideos(
+        playlistId: String,
+        pageToken: String? = null,
+        maxResults: Int = 50,
+        fallbackChannelName: String = "",
+        channelId: String = ""
+    ): PaginatedVideos {
+        return getUploadsPage(playlistId, pageToken, maxResults, fallbackChannelName, channelId)
+    }
+
+    suspend fun getVideoDurations(videoIds: List<String>): Map<String, String> {
+        val nonBlankIds = videoIds.filter { it.isNotBlank() }.distinct()
+        if (nonBlankIds.isEmpty()) return emptyMap()
+        ensureApiKey()
+        val result = mutableMapOf<String, String>()
+        for (chunk in nonBlankIds.chunked(50)) {
+            try {
+                val json = getJson(
+                    "videos",
+                    mapOf(
+                        "part" to "contentDetails",
+                        "id" to chunk.joinToString(",")
+                    )
+                )
+                val items = json.optJSONArray("items") ?: continue
+                for (i in 0 until items.length()) {
+                    val item = items.optJSONObject(i) ?: continue
+                    val id = item.optString("id")
+                    val durationIso = item.optJSONObject("contentDetails")?.optString("duration").orEmpty()
+                    val formatted = formatIsoDuration(durationIso)
+                    if (id.isNotBlank() && formatted.isNotBlank()) {
+                        result[id] = formatted
+                    }
+                }
+            } catch (_: Exception) {
+                // Ignore duration errors so video loading is never blocked
+            }
+        }
+        return result
+    }
+
+    private suspend fun populateDurations(videos: List<VideoEntity>): List<VideoEntity> {
+        if (videos.isEmpty()) return videos
+        val durations = getVideoDurations(videos.map { it.videoId })
+        if (durations.isEmpty()) return videos
+        return videos.map { video ->
+            val d = durations[video.videoId]
+            if (!d.isNullOrBlank()) video.copy(duration = d) else video
+        }
+    }
+
+    fun formatIsoDuration(iso: String): String {
+        if (iso.isBlank() || !iso.startsWith("P")) return ""
+        return try {
+            val duration = java.time.Duration.parse(iso)
+            val totalSeconds = duration.seconds
+            val hours = totalSeconds / 3600
+            val minutes = (totalSeconds % 3600) / 60
+            val seconds = totalSeconds % 60
+            if (hours > 0) {
+                String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+            } else {
+                String.format(Locale.US, "%d:%02d", minutes, seconds)
+            }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     private fun decodeHtml(text: String): String {
         if (!text.contains('&')) return text
         return try {
@@ -450,5 +568,20 @@ data class ChannelProfile(
 
 data class PaginatedVideos(
     val videos: List<VideoEntity>,
+    val nextPageToken: String?
+)
+
+data class PlaylistEntity(
+    val playlistId: String,
+    val channelId: String,
+    val channelTitle: String,
+    val title: String,
+    val description: String,
+    val thumbnailUrl: String,
+    val itemCount: Int
+)
+
+data class PaginatedPlaylists(
+    val playlists: List<PlaylistEntity>,
     val nextPageToken: String?
 )
