@@ -57,7 +57,7 @@ class ChannelRepository(
         val pageResult = api.getUploadsPage(
             playlistId = channel.uploadsPlaylistId,
             pageToken = null,
-            maxResults = 50,
+            maxResults = 20,
             fallbackChannelName = channel.channelName,
             channelId = channel.channelId
         )
@@ -88,7 +88,7 @@ class ChannelRepository(
                     val pageResult = api.getUploadsPage(
                         playlistId = channel.uploadsPlaylistId,
                         pageToken = token,
-                        maxResults = 50,
+                        maxResults = 20,
                         fallbackChannelName = channel.channelName,
                         channelId = channel.channelId
                     )

@@ -56,7 +56,7 @@ class ChannelDetailRepository(
         val result = api.getUploadsPage(
             playlistId = uploadsPlaylistId,
             pageToken = pageToken,
-            maxResults = 50,
+            maxResults = 20,
             fallbackChannelName = channelName,
             channelId = channelId
         )

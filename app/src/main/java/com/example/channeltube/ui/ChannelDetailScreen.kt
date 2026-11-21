@@ -65,6 +65,7 @@ import coil.compose.AsyncImage
 import com.example.channeltube.data.local.VideoEntity
 import com.example.channeltube.data.remote.ChannelProfile
 import com.example.channeltube.data.remote.PlaylistEntity
+import com.example.channeltube.download.DownloadDialog
 import com.example.channeltube.viewmodel.ChannelDetailViewModel
 import com.example.channeltube.viewmodel.ChannelDetailViewModelFactory
 import com.example.channeltube.viewmodel.ChannelTab
@@ -94,6 +95,7 @@ fun ChannelDetailScreen(
     }
 
     val listState = rememberLazyListState()
+    var videoToDownload by remember { mutableStateOf<VideoEntity?>(null) }
 
     // Detect when user scrolls near the end to trigger automatic pagination
     LaunchedEffect(listState) {
@@ -563,7 +565,8 @@ fun ChannelDetailScreen(
                                     channelAvatarUrl = uiState.profile?.thumbnailUrl,
                                     onVideoClick = { onVideoClick(shortVideo, null, emptyList()) },
                                     onChannelClick = { /* Already on this channel */ },
-                                    onSaveToPlaylist = { onSaveToPlaylist(shortVideo) }
+                                    onSaveToPlaylist = { onSaveToPlaylist(shortVideo) },
+                                    onDownload = { videoToDownload = shortVideo }
                                 )
                             }
                         }
@@ -583,7 +586,8 @@ fun ChannelDetailScreen(
                         channelAvatarUrl = uiState.profile?.thumbnailUrl,
                         onVideoClick = { onVideoClick(video, null, emptyList()) },
                         onChannelClick = { /* Already on this channel's screen */ },
-                        onSaveToPlaylist = { onSaveToPlaylist(video) }
+                        onSaveToPlaylist = { onSaveToPlaylist(video) },
+                        onDownload = { videoToDownload = video }
                     )
                 }
             }
@@ -606,6 +610,14 @@ fun ChannelDetailScreen(
                 }
             }
         }
+    }
+
+    if (videoToDownload != null) {
+        DownloadDialog(
+            videoId = videoToDownload!!.videoId,
+            videoTitle = videoToDownload!!.title,
+            onDismiss = { videoToDownload = null }
+        )
     }
 }
 

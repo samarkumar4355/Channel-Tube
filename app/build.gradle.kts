@@ -64,6 +64,8 @@ dependencies {
 
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:13.1.0")
+    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.27.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
 }

@@ -14,6 +14,7 @@ import com.example.channeltube.ui.ChannelTubeTheme
 import com.example.channeltube.ui.WarmPlayerManager
 import com.example.channeltube.ui.WebViewPrewarmer
 import com.example.channeltube.viewmodel.MainViewModel
+import kotlinx.coroutines.launch
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -54,6 +55,18 @@ class MainActivity : ComponentActivity() {
 
         // 4. Pre-initialize warm YouTube players for instant video playback (~150ms)
         WarmPlayerManager.init(this)
+
+        // 5. Pre-warm NewPipeExtractor for background downloads
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            com.example.channeltube.download.VideoDownloadManager.initNewPipe()
+        }
+
+        // 6. Request notification permission on Android 13+ (API 33+) for download notifications
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
+            }
+        }
 
         setContent {
             ChannelTubeTheme {

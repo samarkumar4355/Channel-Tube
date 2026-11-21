@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.channeltube.data.local.ChannelEntity
 import com.example.channeltube.data.local.VideoEntity
+import com.example.channeltube.download.DownloadDialog
 import com.example.channeltube.viewmodel.MainViewModel
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.PlayerConstants
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
@@ -83,6 +84,7 @@ fun ShortsScreen(
     var isVerticalScrollMode by remember { mutableStateOf(true) }
     var initialScrollIndex by remember { mutableIntStateOf(0) }
     var openedFromGrid by remember { mutableStateOf(false) }
+    var gridVideoToDownload by remember { mutableStateOf<VideoEntity?>(null) }
 
     val channelMap = remember(channels) { channels.associateBy { it.channelId } }
 
@@ -247,12 +249,21 @@ fun ShortsScreen(
                                 openedFromGrid = true
                                 isVerticalScrollMode = true
                             },
-                            onChannelClick = onChannelClick
+                            onChannelClick = onChannelClick,
+                            onDownload = { gridVideoToDownload = shortVideo }
                         )
                     }
                 }
             }
         }
+    }
+
+    if (gridVideoToDownload != null) {
+        DownloadDialog(
+            videoId = gridVideoToDownload!!.videoId,
+            videoTitle = gridVideoToDownload!!.title,
+            onDismiss = { gridVideoToDownload = null }
+        )
     }
 }
 
@@ -287,6 +298,7 @@ private fun ShortsVerticalPager(
     var isUserSeeking by remember { mutableStateOf(false) }
     var userSeekValue by remember { mutableFloatStateOf(0f) }
     var showPlayIconFeedback by remember { mutableStateOf(false) }
+    var videoToDownload by remember { mutableStateOf<VideoEntity?>(null) }
 
     val activeVideo = remember(pagerState.currentPage, shorts) {
         if (shorts.isNotEmpty() && pagerState.currentPage in shorts.indices) {
@@ -483,31 +495,62 @@ private fun ShortsVerticalPager(
                         }
                     }
 
-                    // Floating Play/Pause Action Button
-                    Surface(
-                        onClick = {
-                            if (isPlaying) {
-                                playerRef?.pause()
-                                isPlaying = false
-                            } else {
-                                playerRef?.play()
-                                isPlaying = true
-                            }
-                        },
-                        shape = CircleShape,
-                        color = Color.Black.copy(alpha = 0.6f),
+                    // Floating Action Buttons (Download & Play/Pause)
+                    Column(
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(end = 16.dp, bottom = 48.dp)
-                            .size(46.dp)
+                            .padding(end = 16.dp, bottom = 48.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                text = if (isPlaying) "❚❚" else "▶",
-                                color = Color.White,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                        // 1. Download Short Button
+                        Surface(
+                            onClick = { videoToDownload = shortVideo },
+                            shape = CircleShape,
+                            color = Color.Black.copy(alpha = 0.65f),
+                            modifier = Modifier.size(46.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = "⬇",
+                                        color = Color.White,
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "Save",
+                                        color = Color.White,
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+
+                        // 2. Play/Pause Action Button
+                        Surface(
+                            onClick = {
+                                if (isPlaying) {
+                                    playerRef?.pause()
+                                    isPlaying = false
+                                } else {
+                                    playerRef?.play()
+                                    isPlaying = true
+                                }
+                            },
+                            shape = CircleShape,
+                            color = Color.Black.copy(alpha = 0.65f),
+                            modifier = Modifier.size(46.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = if (isPlaying) "❚❚" else "▶",
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
 
@@ -733,6 +776,14 @@ private fun ShortsVerticalPager(
             }
         }
     }
+
+    if (videoToDownload != null) {
+        DownloadDialog(
+            videoId = videoToDownload!!.videoId,
+            videoTitle = videoToDownload!!.title,
+            onDismiss = { videoToDownload = null }
+        )
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -805,7 +856,8 @@ fun ShortCard(
     channelAvatarUrl: String? = null,
     onVideoClick: () -> Unit,
     onChannelClick: (String) -> Unit,
-    onSaveToPlaylist: (() -> Unit)? = null
+    onSaveToPlaylist: (() -> Unit)? = null,
+    onDownload: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier
@@ -858,6 +910,22 @@ fun ShortCard(
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 0.5.sp
                         )
+                    }
+                }
+
+                if (onDownload != null) {
+                    Surface(
+                        onClick = onDownload,
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .size(30.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("⬇", color = Color.White, fontSize = 13.sp)
+                        }
                     }
                 }
 

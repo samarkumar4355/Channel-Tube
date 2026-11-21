@@ -114,7 +114,7 @@ class YouTubeApi(private val apiKey: String) {
     suspend fun getUploadsPage(
         playlistId: String,
         pageToken: String? = null,
-        maxResults: Int = 50,
+        maxResults: Int = 20,
         fallbackChannelName: String = "",
         channelId: String = ""
     ): PaginatedVideos {
@@ -462,7 +462,7 @@ class YouTubeApi(private val apiKey: String) {
     suspend fun getPlaylistVideos(
         playlistId: String,
         pageToken: String? = null,
-        maxResults: Int = 50,
+        maxResults: Int = 20,
         fallbackChannelName: String = "",
         channelId: String = ""
     ): PaginatedVideos {

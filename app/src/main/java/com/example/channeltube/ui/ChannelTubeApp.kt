@@ -113,6 +113,7 @@ import com.example.channeltube.data.local.ChannelEntity
 import com.example.channeltube.data.local.VideoEntity
 import com.example.channeltube.data.remote.ChannelSearchResult
 import com.example.channeltube.data.remote.PlaylistEntity
+import com.example.channeltube.download.DownloadDialog
 import com.example.channeltube.viewmodel.MainViewModel
 
 private enum class MainTab(val label: String, val symbol: String) {
@@ -163,6 +164,7 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.FEED.name) }
     var selectedVideo by remember { mutableStateOf<VideoEntity?>(null) }
     var selectedChannelId by remember { mutableStateOf<String?>(null) }
+    var feedVideoToDownload by remember { mutableStateOf<VideoEntity?>(null) }
 
     // Pre-cue the first feed video so top video playback is instantaneous (< 50ms)
     LaunchedEffect(videos) {
@@ -257,7 +259,8 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
                         onSearchQueryChange = { viewModel.onVideoSearchQueryChange(it) },
                         onSearchSubmit = { viewModel.searchAnyVideo() },
                         onClearSearch = { viewModel.clearVideoSearch() },
-                        onSaveToPlaylist = { viewModel.openAddToPlaylistDialog(it) }
+                        onSaveToPlaylist = { viewModel.openAddToPlaylistDialog(it) },
+                        onDownload = { feedVideoToDownload = it }
                     )
                     MainTab.SHORTS -> ShortsScreen(
                         viewModel = viewModel,
@@ -302,6 +305,14 @@ fun ChannelTubeApp(viewModel: MainViewModel) {
             onToggle = { plId -> viewModel.toggleVideoInCustomPlaylist(plId, videoToAddToPlaylist!!) },
             onCreatePlaylist = { title -> viewModel.createCustomPlaylist(title, videoToAddToPlaylist) },
             onDismiss = { viewModel.closeAddToPlaylistDialog() }
+        )
+    }
+
+    if (feedVideoToDownload != null) {
+        DownloadDialog(
+            videoId = feedVideoToDownload!!.videoId,
+            videoTitle = feedVideoToDownload!!.title,
+            onDismiss = { feedVideoToDownload = null }
         )
     }
 }
@@ -357,7 +368,8 @@ private fun FeedScreen(
     onSearchQueryChange: (String) -> Unit,
     onSearchSubmit: () -> Unit,
     onClearSearch: () -> Unit,
-    onSaveToPlaylist: (VideoEntity) -> Unit = {}
+    onSaveToPlaylist: (VideoEntity) -> Unit = {},
+    onDownload: (VideoEntity) -> Unit = {}
 ) {
     if (isSearchSubmitted || searchQuery.isNotBlank()) {
         BackHandler {
@@ -463,7 +475,8 @@ private fun FeedScreen(
                             channelAvatarUrl = channel?.thumbnailUrl,
                             onVideoClick = { onVideoClick(video) },
                             onChannelClick = onChannelClick,
-                            onSaveToPlaylist = { onSaveToPlaylist(video) }
+                            onSaveToPlaylist = { onSaveToPlaylist(video) },
+                            onDownload = { onDownload(video) }
                         )
                     }
                 }
@@ -537,7 +550,8 @@ private fun FeedScreen(
                             channelAvatarUrl = channel?.thumbnailUrl,
                             onVideoClick = { onVideoClick(video) },
                             onChannelClick = onChannelClick,
-                            onSaveToPlaylist = { onSaveToPlaylist(video) }
+                            onSaveToPlaylist = { onSaveToPlaylist(video) },
+                            onDownload = { onDownload(video) }
                         )
                     }
                 } else {
@@ -615,7 +629,8 @@ private fun FeedScreen(
                             channelAvatarUrl = channel?.thumbnailUrl,
                             onVideoClick = { onVideoClick(video) },
                             onChannelClick = onChannelClick,
-                            onSaveToPlaylist = { onSaveToPlaylist(video) }
+                            onSaveToPlaylist = { onSaveToPlaylist(video) },
+                            onDownload = { onDownload(video) }
                         )
                     }
                     if (isLoadingMore) {
@@ -719,7 +734,8 @@ fun VideoCard(
     channelAvatarUrl: String? = null,
     onVideoClick: () -> Unit,
     onChannelClick: (String) -> Unit,
-    onSaveToPlaylist: (() -> Unit)? = null
+    onSaveToPlaylist: (() -> Unit)? = null,
+    onDownload: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier
@@ -848,6 +864,29 @@ fun VideoCard(
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+
+                    if (onDownload != null) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            onClick = onDownload,
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text("⬇", fontSize = 11.sp)
+                                Text(
+                                    text = "Download",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
                             }
                         }
@@ -1219,6 +1258,7 @@ private fun PlayerScreen(
         label = "player_thumbnail_alpha"
     )
     var isFullscreen by remember { mutableStateOf(false) }
+    var videoToDownload by remember { mutableStateOf<VideoEntity?>(null) }
 
     var fullscreenViewRef by remember { mutableStateOf<View?>(null) }
     var exitFullscreenFn by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -1579,7 +1619,7 @@ private fun PlayerScreen(
                             }
                         }
 
-                        // Save to Playlist Action Button
+                        // Save to Playlist & Download Action Buttons
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1603,6 +1643,27 @@ private fun PlayerScreen(
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                onClick = { videoToDownload = video },
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.clip(RoundedCornerShape(20.dp))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text("⬇", fontSize = 12.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                                    Text(
+                                        text = "Download",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
                                     )
                                 }
                             }
@@ -1801,7 +1862,8 @@ private fun PlayerScreen(
                         channelAvatarUrl = channel?.thumbnailUrl,
                         onVideoClick = { onVideoSelect(feedVideo) },
                         onChannelClick = onChannelClick,
-                        onSaveToPlaylist = { onSaveToPlaylist(feedVideo) }
+                        onSaveToPlaylist = { onSaveToPlaylist(feedVideo) },
+                        onDownload = { videoToDownload = feedVideo }
                     )
                 }
             } else {
@@ -1839,7 +1901,8 @@ private fun PlayerScreen(
                         channelAvatarUrl = channel?.thumbnailUrl,
                         onVideoClick = { onVideoSelect(feedVideo) },
                         onChannelClick = onChannelClick,
-                        onSaveToPlaylist = { onSaveToPlaylist(feedVideo) }
+                        onSaveToPlaylist = { onSaveToPlaylist(feedVideo) },
+                        onDownload = { videoToDownload = feedVideo }
                     )
                 }
 
@@ -1871,6 +1934,14 @@ private fun PlayerScreen(
                 }
             }
         }
+    }
+
+    if (videoToDownload != null) {
+        DownloadDialog(
+            videoId = videoToDownload!!.videoId,
+            videoTitle = videoToDownload!!.title,
+            onDismiss = { videoToDownload = null }
+        )
     }
 }
 
